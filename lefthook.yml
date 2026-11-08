@@ -1,0 +1,35 @@
+# ==============================================================================
+# Enterprise Lefthook Configuration — de-healthcare-interop-lakehouse
+# Enforces Branch Governance, Ruff Formatting/Linting, Strict Mypy Typing,
+# Conventional Commits, and 100% Test Coverage + HIPAA De-Identification Gates.
+# ==============================================================================
+
+min_version: 1.8.0
+
+pre-commit:
+  parallel: true
+  commands:
+    protect-main-branch:
+      run: uv run --no-sync python scripts/git_hooks.py protect-main
+    block-phi-artifacts:
+      run: uv run --no-sync python scripts/git_hooks.py block-phi
+    ruff-lint:
+      glob: "*.py"
+      run: uv run --no-sync ruff check src tests scripts
+    ruff-format:
+      glob: "*.py"
+      run: uv run --no-sync ruff format --check src tests scripts
+    mypy-typecheck:
+      glob: "*.py"
+      run: uv run --no-sync mypy src tests scripts
+
+commit-msg:
+  commands:
+    conventional-commit-check:
+      run: uv run --no-sync python scripts/git_hooks.py commit-msg {1}
+
+pre-push:
+  parallel: false
+  commands:
+    pytest-100-coverage:
+      run: uv run --no-sync pytest
