@@ -10,26 +10,26 @@ pre-commit:
   parallel: true
   commands:
     protect-main-branch:
-      run: uv run python scripts/git_hooks.py protect-main
+      run: uv run --no-sync python scripts/git_hooks.py protect-main
     block-phi-artifacts:
-      run: uv run python scripts/git_hooks.py block-phi
+      run: uv run --no-sync python scripts/git_hooks.py block-phi
     ruff-lint:
       glob: "*.py"
-      run: uv run ruff check src tests scripts
+      run: uv run --no-sync ruff check src tests scripts
     ruff-format:
       glob: "*.py"
-      run: uv run ruff format --check src tests scripts
+      run: uv run --no-sync ruff format --check src tests scripts
     mypy-typecheck:
       glob: "*.py"
-      run: uv run mypy src
+      run: uv run --no-sync mypy src tests scripts
 
 commit-msg:
   commands:
     conventional-commit-check:
-      run: uv run python scripts/git_hooks.py commit-msg {1}
+      run: uv run --no-sync python scripts/git_hooks.py commit-msg {1}
 
 pre-push:
   parallel: false
   commands:
     pytest-100-coverage:
-      run: uv run pytest
+      run: uv run --no-sync pytest

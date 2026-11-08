@@ -1,0 +1,71 @@
+{
+  "name": "cardiopulmonary_chronic",
+  "remarks": [
+    "Custom Synthea-compatible state-machine disease module simulating longitudinal",
+    "cardiopulmonary management (Essential Hypertension + COPD exacerbation monitoring)."
+  ],
+  "states": {
+    "Initial": {
+      "type": "Initial",
+      "direct_transition": "Cardiopulmonary_Encounter"
+    },
+    "Cardiopulmonary_Encounter": {
+      "type": "Encounter",
+      "encounter_class": "IMP",
+      "reason": {
+        "system": "http://snomed.info/sct",
+        "code": "13645005",
+        "display": "Chronic obstructive pulmonary disease"
+      },
+      "direct_transition": "Chronic_Condition_Onset"
+    },
+    "Chronic_Condition_Onset": {
+      "type": "ConditionOnset",
+      "codes": [
+        {
+          "system": "http://hl7.org/fhir/sid/icd-10-cm",
+          "code": "J44.1",
+          "display": "Chronic obstructive pulmonary disease with acute exacerbation"
+        },
+        {
+          "system": "http://snomed.info/sct",
+          "code": "59621000",
+          "display": "Essential hypertension"
+        }
+      ],
+      "direct_transition": "Cardiopulmonary_Vitals_Panel"
+    },
+    "Cardiopulmonary_Vitals_Panel": {
+      "type": "ObservationSeries",
+      "delay_minutes": 20,
+      "observations": [
+        {"loinc": "9279-1", "display": "Respiratory rate", "unit": "/min", "critical_value": 23.0, "stable_value": 15.0},
+        {"loinc": "2708-6", "display": "Oxygen saturation in Arterial blood", "unit": "%", "critical_value": 93.0, "stable_value": 97.0},
+        {"loinc": "3150-0", "display": "Inhaled oxygen concentration", "unit": "%", "critical_value": 28.0, "stable_value": 21.0},
+        {"loinc": "8480-6", "display": "Systolic blood pressure", "unit": "mm[Hg]", "critical_value": 102.0, "stable_value": 128.0},
+        {"loinc": "8462-4", "display": "Diastolic blood pressure", "unit": "mm[Hg]", "critical_value": 66.0, "stable_value": 80.0},
+        {"loinc": "8867-4", "display": "Heart rate", "unit": "/min", "critical_value": 106.0, "stable_value": 76.0},
+        {"loinc": "8310-5", "display": "Body temperature", "unit": "Cel", "critical_value": 38.2, "stable_value": 36.9},
+        {"loinc": "2524-7", "display": "Lactate [Moles/volume] in Serum or Plasma", "unit": "mmol/L", "critical_value": 2.1, "stable_value": 1.1},
+        {"loinc": "67775-7", "display": "Level of responsiveness (ACVPU)", "unit": "{score}", "critical_string": "A", "stable_string": "A"}
+      ],
+      "direct_transition": "Bronchodilator_Therapy_Order"
+    },
+    "Bronchodilator_Therapy_Order": {
+      "type": "MedicationOrder",
+      "delay_minutes": 25,
+      "codes": [
+        {
+          "system": "http://www.nlm.nih.gov/research/umls/rxnorm",
+          "code": "435",
+          "display": "Albuterol 0.083 MG/ML Inhalation Solution"
+        }
+      ],
+      "dosage": "2.5 mg nebulized inhalation every 6 hours",
+      "direct_transition": "Terminal"
+    },
+    "Terminal": {
+      "type": "Terminal"
+    }
+  }
+}
