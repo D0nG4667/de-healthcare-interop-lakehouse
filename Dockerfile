@@ -1,4 +1,7 @@
 # syntax=docker/dockerfile:1
+# ==============================================================================
+# Enterprise Multi-Stage Dockerfile — Healthcare Clinical Interoperability Lakehouse
+# ==============================================================================
 
 # ------------------------------------------------------------------------------
 # Stage 1: builder — Deterministic dependency & wheel builder with BuildKit cache

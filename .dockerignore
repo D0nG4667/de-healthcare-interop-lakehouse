@@ -1,3 +1,7 @@
+# ==============================================================================
+# BuildKit Context Exclusion Rules (.dockerignore)
+# ==============================================================================
+
 # Version control & local git worktrees
 **/.git
 **/.gitignore
