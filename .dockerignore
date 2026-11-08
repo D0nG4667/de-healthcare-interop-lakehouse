@@ -1,0 +1,46 @@
+# Version control & local git worktrees
+**/.git
+**/.gitignore
+**/.gitattributes
+**/.github
+**/.worktrees
+
+# Virtual environments & Python caches
+**/.venv
+**/venv
+**/__pycache__
+**/*.py[cod]
+**/*$py.class
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+**/.coverage
+**/htmlcov
+**/*.egg-info
+**/dist
+**/build
+
+# Local Lakehouse data zones & strictly prohibited PHI/clinical payloads
+data/
+scratch/
+**/*.parquet
+**/*.csv
+**/*.hl7
+**/*.mllp
+**/*.fhir.json
+**/*.fhir.xml
+
+# Secrets, keys, and local environment overrides
+**/.env
+**/.env.*
+**/.aws
+**/*.pem
+**/*.key
+
+# Container & IDE metadata
+**/Dockerfile*
+**/compose.y*ml
+**/docker-compose*
+**/.dockerignore
+**/.vscode
+**/.idea

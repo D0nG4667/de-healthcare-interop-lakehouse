@@ -1,19 +1,32 @@
 # Deployment & Operations Runbook — `de-healthcare-interop-lakehouse`
 
-> **Operational Scope:** Local Containerized Lakehouse Deployment (Docker Compose + MinIO S3), Production Cloud Deployment (AWS S3 + KMS + Spark/EMR), KMS Key Rotation Ceremonies, and Epidemic Surge Playbooks.
+> **Operational Scope:** Local Containerized Lakehouse Deployment (Docker Compose Specification `compose.yaml` + Multi-Stage BuildKit `Dockerfile` + MinIO S3), Production Cloud Deployment (AWS S3 + KMS + Spark/EMR), KMS Key Rotation Ceremonies, and Epidemic Surge Playbooks.
 
 ---
 
-## 1. Containerized Deployment (Docker & Docker Compose)
+## 1. Containerized Deployment (Multi-Stage `Dockerfile` & Canonical `compose.yaml`)
 
-The repository includes a multi-stage production [`Dockerfile`](../../Dockerfile) and [`docker-compose.yml`](../../docker-compose.yml) that spin up:
-1. **`minio-s3`:** Local S3-compatible object storage for Bronze, Silver, and Gold zones.
-2. **`lakehouse-pipeline`:** Executes the end-to-end synthetic clinical simulation, Bronze/Silver/Gold Medallion transformation, and HIPAA Safe Harbor Zero-PHI verification gate.
-3. **`lakehouse-qa`:** Runs the full `ruff`, `mypy --strict`, and `pytest --cov-fail-under=100` verification suite inside the immutable container image.
+The repository follows the official **Docker Compose Specification** using the canonical [`compose.yaml`](../../compose.yaml) filename (preferred over legacy `docker-compose.yml`), paired with a BuildKit-optimized [`Dockerfile`](../../Dockerfile) and [`.dockerignore`](../../.dockerignore):
+
+### Multi-Stage `Dockerfile` Architecture
+1. **`builder` Stage (`ghcr.io/astral-sh/uv:python3.12-bookworm-slim`):**
+   - Uses two-phase BuildKit cache and bind mounts (`--mount=type=cache,target=/root/.cache/uv`, `--mount=type=bind,source=uv.lock,target=uv.lock`) with `UV_COMPILE_BYTECODE=1`, `UV_LINK_MODE=copy`, and `UV_PYTHON_DOWNLOADS=0` so dependency layers remain cached across source edits.
+2. **`qa` Stage (CI / Quality Assurance Target):**
+   - Extends `builder` with `--dev` dependencies, runs as non-root `lakehouse` (`UID=10001`), and executes `pytest --cov=src/healthcare_lakehouse --cov-branch --cov-fail-under=100`.
+3. **`runtime` Stage (`python:3.12-slim-bookworm` — Zero `uv` / Zero Dev Tools):**
+   - Copies only the compiled `/app/.venv` from `builder` (`COPY --from=builder --chown=lakehouse:lakehouse /app /app`), runs as unprivileged `USER lakehouse` (`UID=10001`, `/usr/sbin/nologin`), sets OCI metadata labels, and includes a container `HEALTHCHECK`.
+
+### Canonical `compose.yaml` Services & Hardening
+1. **`minio-s3`:** Pinned release (`minio/minio:RELEASE.2025-02-18T16-25-55Z`) with native `mc ready local` `healthcheck`.
+2. **`lakehouse-pipeline`:** Targets `runtime`, waits for `minio-s3` via long-syntax `depends_on` (`condition: service_healthy`), and enforces `read_only: true`, `cap_drop: [ALL]`, and `security_opt: [no-new-privileges:true]`.
+3. **`lakehouse-qa`:** Targets `qa` under `profiles: ["qa", "test"]` for isolated containerized verification.
 
 ```bash
-# Build and run the complete containerized pipeline and QA suite
+# 1. Build and run the production Medallion pipeline against healthy MinIO S3
 docker compose up --build --abort-on-container-exit
+
+# 2. Run the containerized QA & 100% coverage suite via the 'qa' Compose profile
+docker compose --profile qa run --rm lakehouse-qa
 ```
 
 ---
@@ -44,5 +57,5 @@ To comply with **45 CFR §164.312(a)(2)(iv)** cryptographic key management stand
 ## 4. Incident Response: HIPAA Gate Failure (`HIPAAComplianceError`)
 
 If `HIPAAComplianceAuditor` detects any unmasked PHI in a candidate Silver bundle:
-1. **Fail-Closed Halt:** `assert_bundle_compliant` immediately raises `HIPAAComplianceError` *in memory* before ` _write_silver_tables` is invoked—guaranteeing zero contaminated bytes are written to Silver or Gold Parquet files.
+1. **Fail-Closed Halt:** `assert_bundle_compliant` immediately raises `HIPAAComplianceError` *in memory* before `_write_silver_tables` is invoked—guaranteeing zero contaminated bytes are written to Silver or Gold Parquet files.
 2. **Quarantine & Alert:** The offending Bronze `envelope_id` is logged (without printing raw PHI to stdout logs) so platform engineers can update the parser or regex scrubber rule and replay from Bronze.

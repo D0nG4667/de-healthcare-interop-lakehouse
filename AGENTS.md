@@ -57,8 +57,9 @@ de-healthcare-interop-lakehouse/
 ├── pyproject.toml                                 # uv package config, Ruff, Mypy, Pytest (100% cov)
 ├── lefthook.yml                                   # Enterprise Git hooks (pre-commit, commit-msg, pre-push)
 ├── Makefile                                       # Developer automation targets
-├── Dockerfile                                     # Multi-stage production container image
-├── docker-compose.yml                             # Local lakehouse stack (MinIO S3 + Pipeline + QA)
+├── Dockerfile                                     # Multi-stage BuildKit container image (builder, qa, runtime)
+├── .dockerignore                                  # BuildKit context & PHI artifact exclusion rules
+├── compose.yaml                                   # Canonical Docker Compose Spec stack (MinIO S3 + Pipeline + QA)
 ├── .agents/
 │   ├── rules.md                                   # Master workspace rules index
 │   └── rules/                                     # Modular domain rules (Architecture, HIPAA, Gitflow, TDD)
@@ -123,5 +124,3 @@ de-healthcare-interop-lakehouse/
    - **Branches:** `feature/<scope>` -> `develop` -> `staging` -> `main`.
    - **Prohibition:** Direct commits to `main` are strictly forbidden and blocked by `lefthook`.
    - **Commit Format:** Conventional Commits (`feat(scope): ...`, `fix(scope): ...`, `docs(scope): ...`, `test(scope): ...`, `chore(scope): ...`, `ci(scope): ...`) with clear subject lines (`<= 72` chars) and structured body bullets explaining *what* and *why*.
-5. **Context7 Verification:**
-   - Always consult Context7 MCP for up-to-date library idioms (Pydantic v2 `ConfigDict`, PyArrow Parquet writers, Apache Spark partitioning, Lefthook YAML syntax).
