@@ -78,7 +78,7 @@ no_implicit_optional = true
 check_untyped_defs = true
 warn_redundant_casts = true
 warn_unused_ignores = true
-mypy_path = ["src"]
+mypy_path = ["src", "."]
 packages = ["healthcare_lakehouse"]
 
 [[tool.mypy.overrides]]
@@ -88,7 +88,7 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 minversion = "8.0"
 testpaths = ["tests"]
-pythonpath = ["src"]
+pythonpath = ["src", "."]
 addopts = [
     "-ra",
     "--strict-markers",
