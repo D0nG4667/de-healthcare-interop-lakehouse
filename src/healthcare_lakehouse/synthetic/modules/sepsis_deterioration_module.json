@@ -1,0 +1,83 @@
+{
+  "name": "sepsis_deterioration",
+  "remarks": [
+    "Custom Synthea-compatible state-machine disease module simulating acute sepsis onset,",
+    "progressive physiological deterioration (tachypnea, hypoxia, hypotension, tachycardia,",
+    "fever, hyperlactatemia, and altered mental status), ICU resuscitation, and broad-spectrum",
+    "antibiotic administration."
+  ],
+  "states": {
+    "Initial": {
+      "type": "Initial",
+      "direct_transition": "Emergency_Admission_Encounter"
+    },
+    "Emergency_Admission_Encounter": {
+      "type": "Encounter",
+      "encounter_class": "ICU",
+      "reason": {
+        "system": "http://snomed.info/sct",
+        "code": "91302008",
+        "display": "Sepsis"
+      },
+      "direct_transition": "Sepsis_Condition_Onset"
+    },
+    "Sepsis_Condition_Onset": {
+      "type": "ConditionOnset",
+      "codes": [
+        {
+          "system": "http://hl7.org/fhir/sid/icd-10-cm",
+          "code": "A41.9",
+          "display": "Sepsis, unspecified organism"
+        },
+        {
+          "system": "http://snomed.info/sct",
+          "code": "91302008",
+          "display": "Systemic infection (Sepsis)"
+        }
+      ],
+      "direct_transition": "Baseline_ICU_Triage_Vitals"
+    },
+    "Baseline_ICU_Triage_Vitals": {
+      "type": "ObservationSeries",
+      "delay_minutes": 15,
+      "observations": [
+        {"loinc": "9279-1", "display": "Respiratory rate", "unit": "/min", "critical_value": 26.0, "stable_value": 18.0},
+        {"loinc": "2708-6", "display": "Oxygen saturation in Arterial blood", "unit": "%", "critical_value": 90.0, "stable_value": 96.0},
+        {"loinc": "3150-0", "display": "Inhaled oxygen concentration", "unit": "%", "critical_value": 40.0, "stable_value": 21.0},
+        {"loinc": "8480-6", "display": "Systolic blood pressure", "unit": "mm[Hg]", "critical_value": 86.0, "stable_value": 118.0},
+        {"loinc": "8462-4", "display": "Diastolic blood pressure", "unit": "mm[Hg]", "critical_value": 52.0, "stable_value": 76.0},
+        {"loinc": "8867-4", "display": "Heart rate", "unit": "/min", "critical_value": 134.0, "stable_value": 92.0},
+        {"loinc": "8310-5", "display": "Body temperature", "unit": "Cel", "critical_value": 39.4, "stable_value": 37.8},
+        {"loinc": "2524-7", "display": "Lactate [Moles/volume] in Serum or Plasma", "unit": "mmol/L", "critical_value": 4.6, "stable_value": 1.6},
+        {"loinc": "67775-7", "display": "Level of responsiveness (ACVPU)", "unit": "{score}", "critical_string": "C", "stable_string": "A"}
+      ],
+      "direct_transition": "Empiric_Antibiotic_Order"
+    },
+    "Empiric_Antibiotic_Order": {
+      "type": "MedicationOrder",
+      "delay_minutes": 30,
+      "codes": [
+        {
+          "system": "http://www.nlm.nih.gov/research/umls/rxnorm",
+          "code": "11124",
+          "display": "Vancomycin 1000 MG Intravenous Solution"
+        }
+      ],
+      "dosage": "1000 mg IV every 12 hours infused over 60 minutes",
+      "direct_transition": "Post_Resuscitation_Check"
+    },
+    "Post_Resuscitation_Check": {
+      "type": "ObservationSeries",
+      "delay_minutes": 60,
+      "observations": [
+        {"loinc": "9279-1", "display": "Respiratory rate", "unit": "/min", "critical_value": 28.0, "stable_value": 16.0},
+        {"loinc": "8480-6", "display": "Systolic blood pressure", "unit": "mm[Hg]", "critical_value": 84.0, "stable_value": 122.0},
+        {"loinc": "8867-4", "display": "Heart rate", "unit": "/min", "critical_value": 138.0, "stable_value": 84.0}
+      ],
+      "direct_transition": "Terminal"
+    },
+    "Terminal": {
+      "type": "Terminal"
+    }
+  }
+}
