@@ -1,4 +1,4 @@
-.PHONY: setup lint format typecheck test pipeline audit-hipaa clean
+.PHONY: setup lint format typecheck test pipeline audit-hipaa docker-up docker-qa clean
 
 setup:
 	uv sync --dev
@@ -23,6 +23,12 @@ pipeline:
 audit-hipaa:
 	uv run --no-sync python scripts/git_hooks.py block-phi
 	uv run --no-sync healthcare-lakehouse run-pipeline --patients 12 --seed 42 --output-dir data/audit_run --verify-hipaa
+
+docker-up:
+	docker compose -f compose.yaml up --build --abort-on-container-exit
+
+docker-qa:
+	docker compose -f compose.yaml --profile qa run --rm lakehouse-qa
 
 clean:
 	rm -rf .pytest_cache .mypy_cache .ruff_cache .coverage htmlcov data/local_run data/audit_run

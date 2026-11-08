@@ -1,0 +1,113 @@
+name: healthcare-interop-lakehouse
+
+x-security-baseline: &security-baseline
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+
+x-logging-json: &logging-json
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  minio-s3:
+    image: minio/minio:RELEASE.2025-02-18T16-25-55Z
+    container_name: hc-lakehouse-minio
+    command: server /data --console-address ":9001"
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-lakehouse_admin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-hipaa_safe_harbor_local_secret}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_storage:/data
+    networks:
+      - lakehouse_internal
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+      start_interval: 2s
+    security_opt:
+      - no-new-privileges:true
+    logging: *logging-json
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+
+  lakehouse-pipeline:
+    <<: *security-baseline
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    image: healthcare-interop-lakehouse:runtime
+    container_name: hc-lakehouse-pipeline
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    environment:
+      LAKEHOUSE_KMS_MASTER_SECRET: ${LAKEHOUSE_KMS_MASTER_SECRET:-docker-ephemeral-kms-secret-2026}
+      LAKEHOUSE_S3_ENDPOINT_URL: http://minio-s3:9000
+    volumes:
+      - ./data:/app/data:rw
+    networks:
+      - lakehouse_internal
+    depends_on:
+      minio-s3:
+        condition: service_healthy
+        restart: true
+    logging: *logging-json
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1G
+        reservations:
+          cpus: "0.5"
+          memory: 256M
+
+  lakehouse-qa:
+    <<: *security-baseline
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: qa
+    image: healthcare-interop-lakehouse:qa
+    container_name: hc-lakehouse-qa
+    profiles:
+      - qa
+      - test
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=128m
+    environment:
+      PYTEST_ADDOPTS: "-o cache_dir=/tmp/pytest_cache"
+    networks:
+      - lakehouse_internal
+    logging: *logging-json
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1G
+
+networks:
+  lakehouse_internal:
+    driver: bridge
+
+volumes:
+  minio_storage:
+    driver: local
