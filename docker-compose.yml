@@ -1,0 +1,36 @@
+services:
+  minio-s3:
+    image: minio/minio:latest
+    container_name: hc-lakehouse-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-lakehouse_admin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-hipaa_safe_harbor_local_secret}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_storage:/data
+
+  lakehouse-pipeline:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: hc-lakehouse-pipeline
+    environment:
+      LAKEHOUSE_KMS_MASTER_SECRET: ${LAKEHOUSE_KMS_MASTER_SECRET:-docker-ephemeral-kms-secret-2026}
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      - minio-s3
+
+  lakehouse-qa:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: hc-lakehouse-qa
+    entrypoint: ["uv", "run", "--no-sync", "pytest"]
+    command: ["--cov=src/healthcare_lakehouse", "--cov-branch", "--cov-fail-under=100"]
+
+volumes:
+  minio_storage:
