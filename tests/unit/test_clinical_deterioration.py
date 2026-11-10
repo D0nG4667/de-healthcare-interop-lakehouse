@@ -2,8 +2,15 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
+from healthcare_lakehouse.models.fhir_resources import (
+    FHIRBundle,
+    FHIRCodeableConcept,
+    FHIRCoding,
+    FHIRObservation,
+    FHIRQuantity,
+)
 from healthcare_lakehouse.scoring.clinical_deterioration import (
     ClinicalDeteriorationScorer,
     VitalSignSnapshot,
@@ -46,32 +53,104 @@ def test_clinical_deterioration_scorer_evaluates_sepsis_and_stable_bundles() -> 
     assert stable_alert.qsofa_score == 0
 
 
-def test_clinical_deterioration_scorer_news2_physiological_bands() -> None:
-    """Verify all NEWS2 parameter scoring thresholds and LOW/LOW_MEDIUM/MEDIUM/HIGH tiers."""
+def test_clinical_deterioration_ignores_non_acvpu_strings_and_sorts_chronologically() -> None:
+    """Verify narrative string observations do not trigger ACVPU +3 and timestamps sort."""
+    scorer = ClinicalDeteriorationScorer()
+    t0 = datetime(2026, 6, 15, 10, 0, tzinfo=UTC)
+    t1 = t0 + timedelta(minutes=15)
+
+    # Out-of-order observations: newer normal HR (t1) placed BEFORE older high HR (t0),
+    # plus a qualitative string observation ("normal") on a non-ACVPU LOINC code,
+    # and an invalid ACVPU string ("UNKNOWN") on 67775-7 that should normalize to "A".
+    hr_concept = FHIRCodeableConcept(
+        coding=(FHIRCoding(system="http://loinc.org", code="8867-4", display="Heart rate"),),
+        text="Heart rate",
+    )
+    acvpu_concept = FHIRCodeableConcept(
+        coding=(FHIRCoding(system="http://loinc.org", code="67775-7", display="ACVPU"),),
+        text="ACVPU",
+    )
+    obs_newer_normal_hr = FHIRObservation(
+        id="kms:obs-2",
+        subject_id="kms:pat-1",
+        encounter_id="kms:enc-1",
+        effective_datetime=t1,
+        code=hr_concept,
+        value_quantity=FHIRQuantity(value=76.0, unit="/min", code="/min"),
+    )
+    obs_older_high_hr = FHIRObservation(
+        id="kms:obs-1",
+        subject_id="kms:pat-1",
+        encounter_id="kms:enc-1",
+        effective_datetime=t0,
+        code=hr_concept,
+        value_quantity=FHIRQuantity(value=135.0, unit="/min", code="/min"),
+    )
+    obs_qualitative_text = FHIRObservation(
+        id="kms:obs-3",
+        subject_id="kms:pat-1",
+        encounter_id="kms:enc-1",
+        effective_datetime=t1,
+        code=hr_concept,
+        value_string="normal sinus rhythm",
+    )
+    obs_invalid_acvpu = FHIRObservation(
+        id="kms:obs-4",
+        subject_id="kms:pat-1",
+        encounter_id="kms:enc-1",
+        effective_datetime=t0,
+        code=acvpu_concept,
+        value_string="unrecognized",
+    )
+    bundle = FHIRBundle(
+        id="kms:bundle-1",
+        timestamp=t0,
+        entries=(
+            obs_newer_normal_hr,
+            obs_older_high_hr,
+            obs_qualitative_text,
+            obs_invalid_acvpu,
+        ),
+    )
+    alert = scorer.evaluate_bundle(bundle)
+    assert alert.patient_token == "kms:pat-1"
+    assert alert.encounter_token == "kms:enc-1"
+    assert alert.news2_score == 0
+    assert alert.qsofa_score == 0
+    assert alert.risk_level == "LOW"
+
+    # Empty observation-less bundle fallback
+    empty_alert = scorer.evaluate_bundle(FHIRBundle(id="kms:empty", timestamp=t0, entries=()))
+    assert empty_alert.patient_token == "UNKNOWN-PATIENT"
+    assert empty_alert.encounter_token == "UNKNOWN-ENCOUNTER"
+
+
+def test_clinical_deterioration_scorer_news2_physiological_bands_and_rounding() -> None:
+    """Verify all NEWS2 parameter bands, fractional vital rounding, and risk tiers."""
     scorer = ClinicalDeteriorationScorer()
     ts = datetime(2026, 6, 15, 12, 0, tzinfo=UTC)
 
-    # 1. Extreme low values (bradypnea <=8, hypoxia <=91, SBP <=90, HR <=40, Temp <=35.0)
-    extreme_low = VitalSignSnapshot(
-        respiratory_rate=7.0,
-        spo2_percent=89.0,
+    # Fractional boundary check: HR 130.7 rounds to 131 (+3), RR 24.6 rounds to 25 (+3)
+    fractional = VitalSignSnapshot(
+        respiratory_rate=24.6,
+        spo2_percent=91.4,
         inhaled_o2_percent=28.0,
-        systolic_bp=85.0,
-        heart_rate=38.0,
-        temperature_celsius=34.8,
+        systolic_bp=90.4,
+        heart_rate=130.7,
+        temperature_celsius=35.04,
         lactate_mmol_l=3.2,
         acvpu_consciousness="V",
     )
-    alert_low_extremes = scorer.score_snapshot(
-        snapshot=extreme_low,
+    alert_fractional = scorer.score_snapshot(
+        snapshot=fractional,
         patient_token="kms:p1",
         encounter_token="kms:e1",
         evaluated_at=ts,
     )
-    assert alert_low_extremes.risk_level == "HIGH"
-    assert alert_low_extremes.news2_score == 20
+    assert alert_fractional.risk_level == "HIGH"
+    assert alert_fractional.news2_score == 20
 
-    # 2. Mildly abnormal bands (RR 9-11, SpO2 92-93, SBP 91-100, HR 41-50, Temp 35.1-36.0)
+    # Mildly abnormal bands (RR 9-11, SpO2 92-93, SBP 91-100, HR 41-50, Temp 35.1-36.0)
     medium_vitals = VitalSignSnapshot(
         respiratory_rate=10.0,
         spo2_percent=92.0,
@@ -91,7 +170,7 @@ def test_clinical_deterioration_scorer_news2_physiological_bands() -> None:
     assert alert_medium.news2_score == 7
     assert alert_medium.risk_level == "HIGH"
 
-    # 3. Score 5-6 MEDIUM tier (RR 22, SpO2 94, SBP 105, HR 95, Temp 38.5 => score 6)
+    # Score 5-6 MEDIUM tier (RR 22, SpO2 94, SBP 105, HR 95, Temp 38.5 => score 6)
     tier_medium = VitalSignSnapshot(
         respiratory_rate=22.0,
         spo2_percent=94.0,
@@ -111,13 +190,13 @@ def test_clinical_deterioration_scorer_news2_physiological_bands() -> None:
     assert alert_tier_med.news2_score == 6
     assert alert_tier_med.risk_level == "MEDIUM"
 
-    # 4. Single parameter red score (score 3 on SBP >= 220, all others 0 -> LOW_MEDIUM)
+    # Single parameter red score (score 3 on SBP >= 220, all others 0 -> LOW_MEDIUM)
     single_red = VitalSignSnapshot(
         respiratory_rate=15.0,
         spo2_percent=98.0,
         inhaled_o2_percent=21.0,
         systolic_bp=225.0,
-        heart_rate=115.0,  # +2 -> total 5 or with HR 75 -> total 3 (LOW_MEDIUM)
+        heart_rate=115.0,
         temperature_celsius=37.0,
         lactate_mmol_l=1.0,
         acvpu_consciousness="A",
@@ -131,7 +210,6 @@ def test_clinical_deterioration_scorer_news2_physiological_bands() -> None:
     assert alert_single_red.news2_score == 3
     assert alert_single_red.risk_level == "LOW_MEDIUM"
 
-    # Test HR 111-130 (+2) band
     alert_hr_band = scorer.score_snapshot(
         snapshot=single_red,
         patient_token="kms:p5",

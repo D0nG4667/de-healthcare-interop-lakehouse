@@ -26,7 +26,7 @@ COPY pyproject.toml uv.lock README.md ./
 COPY src/ ./src/
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --locked --no-dev
+    uv sync --locked --no-dev --no-editable
 
 # ------------------------------------------------------------------------------
 # Stage 2: qa — Immutable CI/CD Quality Assurance, Type-Safety & 100% Coverage
@@ -48,13 +48,14 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1
+    PYTHONDONTWRITEBYTECODE=1 \
+    COVERAGE_FILE=/tmp/.coverage
 
 USER lakehouse
 WORKDIR /app
 
 ENTRYPOINT ["pytest"]
-CMD ["--cov=src/healthcare_lakehouse", "--cov-branch", "--cov-report=term-missing", "--cov-fail-under=100"]
+CMD ["--cov=src/healthcare_lakehouse", "--cov=scripts", "--cov-branch", "--cov-report=term-missing", "--cov-fail-under=100"]
 
 # ------------------------------------------------------------------------------
 # Stage 3: runtime — Hardened Non-Root Production Runtime (Zero uv / Zero Dev Tools)
@@ -75,8 +76,8 @@ RUN groupadd --system --gid "${GID}" lakehouse \
     && mkdir -p /app/data \
     && chown -R lakehouse:lakehouse /app
 
-# Copy only the compiled virtual environment and package from builder (no uv binary)
-COPY --from=builder --chown=lakehouse:lakehouse /app /app
+# Copy only the compiled virtual environment and installed wheel from builder (no uv binary)
+COPY --from=builder --chown=lakehouse:lakehouse /app/.venv /app/.venv
 
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \

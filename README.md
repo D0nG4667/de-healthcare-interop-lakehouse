@@ -179,7 +179,7 @@ Every engineering claim in this repository is backed by reproducible, automated 
 
 - **100.0% HIPAA Safe Harbor Compliance (Zero Leaked PHI):** Automated audits via [`HIPAAComplianceAuditor`](src/healthcare_lakehouse/security/hipaa_anonymizer.py) verify that **100% of the 18 HIPAA Safe Harbor identifiers** (names, street/city, restricted 3-digit ZIPs, full dates, ages `>= 90`, phones, emails, URLs, SSNs, MRNs, device IPs, and free-text clinical notes) are redacted, top-coded, or KMS-tokenized before Silver/Gold persistence.
 - **Sub-Second Clinical Deterioration Alerting (`< 2 ms` per Bundle):** [`ClinicalDeteriorationScorer`](src/healthcare_lakehouse/scoring/clinical_deterioration.py) evaluates 9 LOINC vital sign streams per patient, accurately separating high-acuity sepsis cases (`NEWS2 = 17`, `qSOFA = 3`, `HIGH` risk) from stable chronic cases (`NEWS2 = 0`, `qSOFA = 0`, `LOW` risk).
-- **100.00% Verified Line & Branch Test Coverage:** `28` unit and end-to-end integration tests cover `1,322` statements and `356` branches at **100.00% coverage** (`uv run pytest --cov-fail-under=100`), with `0` Ruff lint errors and `0` Mypy `--strict` errors across `36` source files.
+- **100.00% Verified Line & Branch Test Coverage:** `34` unit and end-to-end integration tests cover `1,590` statements and `452` branches at **100.00% coverage** (`uv run pytest --cov-fail-under=100`), with `0` Ruff lint errors and `0` Mypy `--strict` errors.
 
 ---
 
@@ -233,8 +233,8 @@ uv run --no-sync healthcare-lakehouse run-pipeline \
   "bronze_records_written": 14,
   "silver_patients_written": 14,
   "silver_encounters_written": 14,
-  "silver_observations_written": 141,
-  "silver_conditions_written": 14,
+  "silver_observations_written": 138,
+  "silver_conditions_written": 13,
   "silver_medications_written": 12,
   "gold_alerts_written": 14,
   "gold_cohort_metrics_written": 2,

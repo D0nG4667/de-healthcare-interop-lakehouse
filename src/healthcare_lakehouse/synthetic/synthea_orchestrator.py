@@ -33,7 +33,7 @@ MODULES_DIR: Path = Path(__file__).resolve().parent / "modules"
 _FIRST_NAMES_FEMALE: tuple[str, ...] = (
     "Elena",
     "Miriam",
-    "fatima",
+    "Fatima",
     "Hannah",
     "Amina",
     "Clara",
@@ -43,7 +43,7 @@ _FIRST_NAMES_MALE: tuple[str, ...] = (
     "Samuel",
     "David",
     "Kwame",
-    " Mateo",
+    "Mateo",
     "Arthur",
 )
 _LAST_NAMES: tuple[str, ...] = (
@@ -424,8 +424,18 @@ class SyntheaOrchestrator:
             ET.SubElement(enc_el, "status", attrib={"value": enc.status})
             ET.SubElement(enc_el, "class", attrib={"code": enc.class_code})
             ET.SubElement(enc_el, "subject", attrib={"reference": f"Patient/{enc.subject_id}"})
-            ET.SubElement(enc_el, "periodStart", attrib={"value": enc.period_start.isoformat()})
-            ET.SubElement(enc_el, "facilityId", attrib={"value": enc.facility_id})
+            period_el = ET.SubElement(enc_el, "period")
+            ET.SubElement(period_el, "start", attrib={"value": enc.period_start.isoformat()})
+            if enc.period_end is not None:
+                ET.SubElement(period_el, "end", attrib={"value": enc.period_end.isoformat()})
+            ET.SubElement(
+                enc_el,
+                "serviceProvider",
+                attrib={"reference": f"Organization/{enc.facility_id}"},
+            )
+            if enc.attending_physician:
+                part_el = ET.SubElement(enc_el, "participant")
+                ET.SubElement(part_el, "individual", attrib={"display": enc.attending_physician})
 
         for obs in bundle.observations():
             entry_el = ET.SubElement(root, "entry")
@@ -442,29 +452,20 @@ class SyntheaOrchestrator:
             )
             coding = obs.code.coding[0]
             code_el = ET.SubElement(obs_el, "code")
-            ET.SubElement(
-                code_el,
-                "coding",
-                attrib={
-                    "system": coding.system,
-                    "code": coding.code,
-                    "display": coding.display,
-                },
-            )
+            coding_el = ET.SubElement(code_el, "coding")
+            ET.SubElement(coding_el, "system", attrib={"value": coding.system})
+            ET.SubElement(coding_el, "code", attrib={"value": coding.code})
+            ET.SubElement(coding_el, "display", attrib={"value": coding.display})
             if obs.value_quantity is not None:
-                ET.SubElement(
-                    obs_el,
-                    "valueQuantity",
-                    attrib={
-                        "value": str(obs.value_quantity.value),
-                        "unit": obs.value_quantity.unit,
-                        "code": obs.value_quantity.code,
-                    },
-                )
+                vq_el = ET.SubElement(obs_el, "valueQuantity")
+                ET.SubElement(vq_el, "value", attrib={"value": str(obs.value_quantity.value)})
+                ET.SubElement(vq_el, "unit", attrib={"value": obs.value_quantity.unit})
+                ET.SubElement(vq_el, "code", attrib={"value": obs.value_quantity.code})
             else:
                 ET.SubElement(obs_el, "valueString", attrib={"value": obs.value_string or ""})
             if obs.note:
-                ET.SubElement(obs_el, "note", attrib={"text": obs.note})
+                note_el = ET.SubElement(obs_el, "note")
+                ET.SubElement(note_el, "text", attrib={"value": obs.note})
 
         for cond in bundle.conditions():
             entry_el = ET.SubElement(root, "entry")
@@ -479,11 +480,11 @@ class SyntheaOrchestrator:
                 cond_el, "onsetDateTime", attrib={"value": cond.onset_datetime.isoformat()}
             )
             c0 = cond.code.coding[0]
-            ET.SubElement(
-                cond_el,
-                "coding",
-                attrib={"system": c0.system, "code": c0.code, "display": c0.display},
-            )
+            cond_code_el = ET.SubElement(cond_el, "code")
+            cond_coding_el = ET.SubElement(cond_code_el, "coding")
+            ET.SubElement(cond_coding_el, "system", attrib={"value": c0.system})
+            ET.SubElement(cond_coding_el, "code", attrib={"value": c0.code})
+            ET.SubElement(cond_coding_el, "display", attrib={"value": c0.display})
 
         for med in bundle.medication_requests():
             entry_el = ET.SubElement(root, "entry")
@@ -496,11 +497,12 @@ class SyntheaOrchestrator:
             )
             ET.SubElement(med_el, "authoredOn", attrib={"value": med.authored_on.isoformat()})
             m0 = med.medication_code.coding[0]
-            ET.SubElement(
-                med_el,
-                "coding",
-                attrib={"system": m0.system, "code": m0.code, "display": m0.display},
-            )
-            ET.SubElement(med_el, "dosageText", attrib={"value": med.dosage_text})
+            med_cc_el = ET.SubElement(med_el, "medicationCodeableConcept")
+            med_coding_el = ET.SubElement(med_cc_el, "coding")
+            ET.SubElement(med_coding_el, "system", attrib={"value": m0.system})
+            ET.SubElement(med_coding_el, "code", attrib={"value": m0.code})
+            ET.SubElement(med_coding_el, "display", attrib={"value": m0.display})
+            dosage_el = ET.SubElement(med_el, "dosageInstruction")
+            ET.SubElement(dosage_el, "text", attrib={"value": med.dosage_text})
 
         return ET.tostring(root, encoding="unicode")
