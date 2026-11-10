@@ -13,11 +13,11 @@ Healthcare clinical data arrives in heterogeneous wire formats: pipe-delimited H
 
 ## 2. Decision
 
-We adopt a **Three-Tier Medallion Lakehouse Architecture (`Bronze` → `Silver` → `Gold`)** persisted in **Apache Parquet (`PyArrow`)** with `ZSTD` / `SNAPPY` columnar compression:
+We adopt a **Three-Tier Medallion Lakehouse Architecture (`Bronze` → `Silver` → `Gold`)** persisted in **Apache Parquet (`PyArrow`)** with `ZSTD` / `SNAPPY` columnar compression over a unified `pyarrow.fs.FileSystem` abstraction (`S3FileSystem` for AWS S3 and MinIO S3 object stores; `LocalFileSystem` for offline development and CI):
 
-1. **Bronze Zone (`bronze_clinical_envelope.parquet`):** Append-only raw envelope storing unmodified HL7 v2 / FHIR payloads alongside SHA-256 digests and UTC ingestion watermarks inside a PHI-restricted security boundary.
-2. **Silver Zone (`silver_*.parquet`):** Canonical, relational FHIR R4 entities (`Patient`, `Encounter`, `Observation`, `Condition`, `MedicationRequest`) that have passed the out-of-band **HIPAA Safe Harbor 18-identifier de-identification gate** and automated `HIPAAComplianceAuditor`.
-3. **Gold Zone (`gold_*.parquet`):** Sub-second clinical deterioration alert tables (`NEWS2` / `qSOFA`) and aggregated population cohort tables ready for BI and clinical research.
+1. **Bronze Zone (`s3://<bucket>[/<prefix>]/bronze/bronze_clinical_envelope.parquet`):** Append-only raw envelope storing unmodified HL7 v2 / FHIR payloads alongside SHA-256 digests and UTC ingestion watermarks inside a PHI-restricted security boundary.
+2. **Silver Zone (`s3://<bucket>[/<prefix>]/silver/silver_*.parquet`):** Canonical, relational FHIR R4 entities (`Patient`, `Encounter`, `Observation`, `Condition`, `MedicationRequest`) that have passed the out-of-band **HIPAA Safe Harbor 18-identifier de-identification gate** and automated `HIPAAComplianceAuditor`.
+3. **Gold Zone (`s3://<bucket>[/<prefix>]/gold/gold_*.parquet`):** Sub-second clinical deterioration alert tables (`NEWS2` / `qSOFA`) and aggregated population cohort tables ready for BI and clinical research.
 
 ## 3. Consequences
 
