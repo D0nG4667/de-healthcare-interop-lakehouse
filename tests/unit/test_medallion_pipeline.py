@@ -6,6 +6,7 @@ import json
 from datetime import UTC, date, datetime
 from pathlib import Path
 
+import pyarrow.fs as pafs
 import pyarrow.parquet as pq
 
 from healthcare_lakehouse.config.settings import LakehouseSettings
@@ -122,3 +123,64 @@ def test_medallion_pipeline_preserves_explicit_parquet_schemas_on_minimal_bundle
     assert str(obs_schema.field("numeric_value").type) == "double"
     assert "rxnorm_code" in med_schema.names
     assert pipeline.verify_persisted_hipaa_tables() == ()
+
+
+def test_medallion_pipeline_persists_and_audits_s3_minio_object_storage(
+    tmp_path: Path,
+) -> None:
+    """Verify Bronze, Silver, and Gold S3/MinIO object key layout, s3:// URIs, and HIPAA audit."""
+    minio_backing_dir = tmp_path / "minio_object_store"
+    minio_backing_dir.mkdir(parents=True, exist_ok=True)
+    mock_s3_fs = pafs.SubTreeFileSystem(str(minio_backing_dir), pafs.LocalFileSystem())
+
+    s3_settings = LakehouseSettings(
+        environment="staging",
+        s3_bucket="healthcare-lakehouse",
+        s3_prefix="medallion",
+        s3_endpoint_url="http://minio-s3:9000",
+        s3_access_key="lakehouse_admin",
+        s3_secret_key="hipaa_safe_harbor_local_secret",
+        s3_allow_bucket_creation=True,
+    )
+    pipeline = MedallionLakehousePipeline(settings=s3_settings, filesystem=mock_s3_fs)
+    metrics = pipeline.simulate_and_run(patient_count=4, seed=42)
+
+    assert metrics.bronze_parquet_path == (
+        "s3://healthcare-lakehouse/medallion/bronze/bronze_clinical_envelope.parquet"
+    )
+    assert metrics.silver_patients_parquet_path == (
+        "s3://healthcare-lakehouse/medallion/silver/silver_patients.parquet"
+    )
+    assert metrics.gold_alerts_parquet_path == (
+        "s3://healthcare-lakehouse/medallion/gold/gold_patient_deterioration_alerts.parquet"
+    )
+    assert metrics.gold_cohort_parquet_path == (
+        "s3://healthcare-lakehouse/medallion/gold/gold_cohort_clinical_metrics.parquet"
+    )
+    assert (
+        minio_backing_dir
+        / "healthcare-lakehouse"
+        / "medallion"
+        / "gold"
+        / "gold_patient_deterioration_alerts.parquet"
+    ).is_file()
+
+    # Read back records using s3:// URI through the Arrow filesystem abstraction
+    s3_gold_alerts = pipeline.read_parquet_records(metrics.gold_alerts_parquet_path)
+    assert len(s3_gold_alerts) == metrics.gold_alerts_written
+    assert pipeline.verify_persisted_hipaa_tables() == ()
+
+    # Also test S3 mode when s3_allow_bucket_creation=False (pre-provisioned bucket)
+    precreated_settings = LakehouseSettings(
+        s3_bucket="healthcare-lakehouse",
+        s3_prefix="medallion_precreated",
+        s3_endpoint_url="http://minio-s3:9000",
+        s3_allow_bucket_creation=False,
+    )
+    precreated_pipeline = MedallionLakehousePipeline(
+        settings=precreated_settings,
+        filesystem=mock_s3_fs,
+    )
+    pre_metrics = precreated_pipeline.simulate_and_run(patient_count=2, seed=42)
+    assert pre_metrics.hipaa_violations_detected == 0
+    assert precreated_pipeline.verify_persisted_hipaa_tables() == ()

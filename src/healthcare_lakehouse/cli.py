@@ -42,8 +42,26 @@ def build_parser() -> argparse.ArgumentParser:
     run_cmd.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("data"),
-        help="Base directory for Bronze, Silver, and Gold Parquet zones.",
+        default=None,
+        help="Local base directory for Bronze, Silver, and Gold Parquet zones.",
+    )
+    run_cmd.add_argument(
+        "--s3-bucket",
+        type=str,
+        default=None,
+        help="S3 / MinIO bucket name for scalable object-store Medallion persistence.",
+    )
+    run_cmd.add_argument(
+        "--s3-prefix",
+        type=str,
+        default=None,
+        help="Optional S3 key prefix inside the target bucket (e.g., 'medallion').",
+    )
+    run_cmd.add_argument(
+        "--s3-endpoint-url",
+        type=str,
+        default=None,
+        help="Optional S3-compatible endpoint URL (e.g., 'http://minio-s3:9000').",
     )
     run_cmd.add_argument(
         "--verify-hipaa",
@@ -58,7 +76,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(list(argv) if argv is not None else None)
 
-    settings = LakehouseSettings(base_storage_path=Path(args.output_dir))
+    settings = LakehouseSettings.from_env(
+        base_storage_path=args.output_dir,
+        s3_bucket=args.s3_bucket,
+        s3_prefix=args.s3_prefix,
+        s3_endpoint_url=args.s3_endpoint_url,
+    )
     pipeline = MedallionLakehousePipeline(settings=settings)
     metrics = pipeline.simulate_and_run(patient_count=int(args.patients), seed=int(args.seed))
 
@@ -72,6 +95,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     summary = {
         "status": "SUCCESS",
+        "storage_backend": settings.storage_backend,
         "hipaa_safe_harbor_compliant": metrics.hipaa_violations_detected == 0,
         "verify_hipaa_flag": bool(args.verify_hipaa),
         "bronze_records_written": metrics.bronze_records_written,
