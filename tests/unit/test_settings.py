@@ -104,10 +104,24 @@ def test_settings_s3_minio_filesystem_and_env_resolution(
     assert isinstance(https_s3.build_arrow_filesystem(), pafs.S3FileSystem)
 
     bare_host_s3 = LakehouseSettings(
-        s3_bucket="b2",
+        s3_bucket="s3://b2/",
         s3_endpoint_url="localhost:9000",
     )
+    assert bare_host_s3.s3_bucket == "b2"
+    assert bare_host_s3.table_uri("bronze", "env.parquet") == "s3://b2/bronze/env.parquet"
     assert isinstance(bare_host_s3.build_arrow_filesystem(), pafs.S3FileSystem)
+
+    slash_only_bucket = LakehouseSettings(s3_bucket=" / ")
+    assert slash_only_bucket.s3_bucket is None
+    assert slash_only_bucket.is_s3_storage is False
+
+    prod_http_s3 = LakehouseSettings(
+        environment="production",
+        s3_bucket="prod-phi-bucket",
+        s3_endpoint_url="http://minio-s3:9000",
+    )
+    with pytest.raises(ValueError, match="HTTPS"):
+        prod_http_s3.build_arrow_filesystem()
 
     # Verify LakehouseSettings.from_env(...) resolution and CLI override precedence
     monkeypatch.setenv("LAKEHOUSE_ENV", "staging")

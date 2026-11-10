@@ -52,6 +52,14 @@ class LakehouseSettings(BaseModel):
     hipaa_restricted_zip3_prefixes: frozenset[str] = HIPAA_RESTRICTED_ZIP3_PREFIXES
     parquet_compression: Literal["SNAPPY", "ZSTD", "GZIP"] = "ZSTD"
 
+    @field_validator("s3_bucket", mode="before")
+    @classmethod
+    def _normalize_s3_bucket(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            normalized = value.strip().removeprefix("s3://").strip("/")
+            return normalized or None
+        return value
+
     @field_validator("hipaa_safe_harbor_max_age")
     @classmethod
     def _validate_hipaa_max_age(cls, value: int) -> int:
@@ -167,6 +175,12 @@ class LakehouseSettings(BaseModel):
                 endpoint_override = parsed.netloc
             else:
                 endpoint_override = raw_ep
+
+        if self.environment == "production" and scheme != "https":
+            raise ValueError(
+                "HIPAA Security Rule (45 CFR 164.312(e)(1)) requires HTTPS S3 endpoints "
+                "in production."
+            )
 
         return pafs.S3FileSystem(
             access_key=self.s3_access_key,
