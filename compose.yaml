@@ -64,9 +64,8 @@ services:
       - /tmp:rw,noexec,nosuid,size=64m
     environment:
       LAKEHOUSE_KMS_MASTER_SECRET: ${LAKEHOUSE_KMS_MASTER_SECRET:-docker-ephemeral-kms-secret-2026}
-      LAKEHOUSE_S3_ENDPOINT_URL: http://minio-s3:9000
     volumes:
-      - ./data:/app/data:rw
+      - lakehouse_data:/app/data:rw
     networks:
       - lakehouse_internal
     depends_on:
@@ -98,6 +97,7 @@ services:
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=128m
     environment:
+      COVERAGE_FILE: /tmp/.coverage
       PYTEST_ADDOPTS: "-o cache_dir=/tmp/pytest_cache"
     networks:
       - lakehouse_internal
@@ -114,4 +114,6 @@ networks:
 
 volumes:
   minio_storage:
+    driver: local
+  lakehouse_data:
     driver: local

@@ -15,7 +15,7 @@ typecheck:
 	uv run --no-sync mypy src tests scripts
 
 test:
-	uv run --no-sync pytest --cov=src/healthcare_lakehouse --cov-branch --cov-report=term-missing --cov-fail-under=100
+	uv run --no-sync pytest --cov=src/healthcare_lakehouse --cov=scripts --cov-branch --cov-report=term-missing --cov-fail-under=100
 
 pipeline:
 	uv run --no-sync healthcare-lakehouse run-pipeline --patients 12 --seed 42 --output-dir data/local_run --verify-hipaa
