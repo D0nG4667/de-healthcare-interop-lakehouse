@@ -1,4 +1,4 @@
-"""Cross-platform Enterprise Gitflow & HIPAA Gate hooks invoked by Lefthook."""
+"""Cross-platform Enterprise Gitflow & HIPAA Gate hooks invoked by Lefthook and CI."""
 
 from __future__ import annotations
 
@@ -41,14 +41,16 @@ def protect_main_branch() -> int:
 
 
 def block_phi_artifacts() -> int:
-    """Block accidental staging of raw clinical data files or KMS private keys."""
+    """Block staging or repository tracking of raw clinical data files or KMS private keys."""
     staged = subprocess.check_output(
         ["git", "diff", "--cached", "--name-only"], text=True
     ).splitlines()
-    forbidden = [f for f in staged if f.lower().endswith(FORBIDDEN_EXTENSIONS)]
+    tracked = subprocess.check_output(["git", "ls-files"], text=True).splitlines()
+    candidate_files = sorted(set(staged) | set(tracked))
+    forbidden = [f for f in candidate_files if f.lower().endswith(FORBIDDEN_EXTENSIONS)]
     if forbidden:
         sys.stderr.write(
-            f"HIPAA GATE BLOCKED: Forbidden raw clinical/key files staged: {forbidden}\n"
+            f"HIPAA GATE BLOCKED: Forbidden raw clinical/key files detected: {forbidden}\n"
         )
         return 1
     return 0

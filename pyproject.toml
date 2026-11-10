@@ -94,13 +94,14 @@ addopts = [
     "--strict-markers",
     "--strict-config",
     "--cov=src/healthcare_lakehouse",
+    "--cov=scripts",
     "--cov-branch",
     "--cov-report=term-missing",
     "--cov-fail-under=100",
 ]
 
 [tool.coverage.run]
-source = ["src/healthcare_lakehouse"]
+source = ["src/healthcare_lakehouse", "scripts"]
 branch = true
 
 [tool.coverage.report]

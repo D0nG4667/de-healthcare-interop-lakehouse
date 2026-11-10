@@ -9,6 +9,8 @@ from pydantic import BaseModel, ConfigDict
 
 from healthcare_lakehouse.models.fhir_resources import FHIRBundle
 
+_VALID_ACVPU_CODES: frozenset[str] = frozenset({"A", "C", "V", "P", "U"})
+
 
 class VitalSignSnapshot(BaseModel):
     """Normalized physiological vital signs snapshot for NEWS2 and qSOFA evaluation."""
@@ -46,9 +48,25 @@ class ClinicalDeteriorationScorer:
 
     def evaluate_bundle(self, bundle: FHIRBundle) -> ClinicalDeteriorationAlert:
         """Extract latest physiological vitals from a FHIRBundle and compute acuity scores."""
-        patient_token = bundle.patients()[0].id
+        patients = bundle.patients()
         encounters = bundle.encounters()
-        encounter_token = encounters[0].id
+        sorted_observations = sorted(
+            bundle.observations(),
+            key=lambda item: item.effective_datetime,
+        )
+
+        patient_token = (
+            patients[0].id
+            if patients
+            else (sorted_observations[0].subject_id if sorted_observations else "UNKNOWN-PATIENT")
+        )
+        encounter_token = (
+            encounters[0].id
+            if encounters
+            else (
+                sorted_observations[0].encounter_id if sorted_observations else "UNKNOWN-ENCOUNTER"
+            )
+        )
         evaluated_at = bundle.timestamp
 
         rr = 16.0
@@ -60,7 +78,7 @@ class ClinicalDeteriorationScorer:
         lactate = 1.0
         acvpu = "A"
 
-        for obs in bundle.observations():
+        for obs in sorted_observations:
             evaluated_at = max(evaluated_at, obs.effective_datetime)
             loinc = obs.code.coding[0].code
             if obs.value_quantity is not None:
@@ -79,8 +97,9 @@ class ClinicalDeteriorationScorer:
                     temp = val
                 elif loinc == "2524-7":
                     lactate = val
-            else:
-                acvpu = (obs.value_string or "A").strip().upper()
+            elif loinc == "67775-7" and obs.value_string is not None:
+                candidate_acvpu = obs.value_string.strip().upper()
+                acvpu = candidate_acvpu if candidate_acvpu in _VALID_ACVPU_CODES else "A"
 
         snapshot = VitalSignSnapshot(
             respiratory_rate=rr,
@@ -122,8 +141,8 @@ class ClinicalDeteriorationScorer:
         triggered = tuple(f"{name}(+{score})" for name, score in subscores if score > 0)
 
         qsofa = (
-            (1 if snapshot.respiratory_rate >= 22.0 else 0)
-            + (1 if snapshot.systolic_bp <= 100.0 else 0)
+            (1 if round(snapshot.respiratory_rate) >= 22 else 0)
+            + (1 if round(snapshot.systolic_bp) <= 100 else 0)
             + (1 if snapshot.acvpu_consciousness != "A" else 0)
         )
 
@@ -156,50 +175,55 @@ class ClinicalDeteriorationScorer:
 
     @staticmethod
     def _score_respiratory_rate(rr: float) -> int:
-        if rr <= 8.0 or rr >= 25.0:
+        val = round(rr)
+        if val <= 8 or val >= 25:
             return 3
-        if rr >= 21.0:
+        if val >= 21:
             return 2
-        if rr <= 11.0:
+        if val <= 11:
             return 1
         return 0
 
     @staticmethod
     def _score_spo2(spo2: float) -> int:
-        if spo2 <= 91.0:
+        val = round(spo2)
+        if val <= 91:
             return 3
-        if spo2 <= 93.0:
+        if val <= 93:
             return 2
-        if spo2 <= 95.0:
+        if val <= 95:
             return 1
         return 0
 
     @staticmethod
     def _score_systolic_bp(sbp: float) -> int:
-        if sbp <= 90.0 or sbp >= 220.0:
+        val = round(sbp)
+        if val <= 90 or val >= 220:
             return 3
-        if sbp <= 100.0:
+        if val <= 100:
             return 2
-        if sbp <= 110.0:
+        if val <= 110:
             return 1
         return 0
 
     @staticmethod
     def _score_heart_rate(hr: float) -> int:
-        if hr <= 40.0 or hr >= 131.0:
+        val = round(hr)
+        if val <= 40 or val >= 131:
             return 3
-        if hr >= 111.0:
+        if val >= 111:
             return 2
-        if hr <= 50.0 or hr >= 91.0:
+        if val <= 50 or val >= 91:
             return 1
         return 0
 
     @staticmethod
     def _score_temperature(temp: float) -> int:
-        if temp <= 35.0:
+        val = round(temp, 1)
+        if val <= 35.0:
             return 3
-        if temp >= 39.1:
+        if val >= 39.1:
             return 2
-        if temp <= 36.0 or temp >= 38.1:
+        if val <= 36.0 or val >= 38.1:
             return 1
         return 0

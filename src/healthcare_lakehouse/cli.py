@@ -10,6 +10,7 @@ from pathlib import Path
 
 from healthcare_lakehouse.config.settings import LakehouseSettings
 from healthcare_lakehouse.lakehouse.medallion_pipeline import MedallionLakehousePipeline
+from healthcare_lakehouse.security.hipaa_anonymizer import HIPAAComplianceError
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -47,7 +48,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_cmd.add_argument(
         "--verify-hipaa",
         action="store_true",
-        help="Enforce strict HIPAA Safe Harbor 18-identifier Zero-PHI audit verification.",
+        help="Enforce strict post-persistence HIPAA Safe Harbor Zero-PHI Parquet verification.",
     )
     return parser
 
@@ -60,6 +61,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     settings = LakehouseSettings(base_storage_path=Path(args.output_dir))
     pipeline = MedallionLakehousePipeline(settings=settings)
     metrics = pipeline.simulate_and_run(patient_count=int(args.patients), seed=int(args.seed))
+
+    if args.verify_hipaa:
+        persisted_violations = pipeline.verify_persisted_hipaa_tables()
+        if persisted_violations:
+            raise HIPAAComplianceError(
+                f"Persisted Parquet HIPAA audit failed with {len(persisted_violations)} "
+                f"violation(s): {persisted_violations}"
+            )
 
     summary = {
         "status": "SUCCESS",

@@ -35,46 +35,36 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Install uv Package Manager
+      - name: Install uv & Python ${{ matrix.python-version }}
         uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
+          python-version: ${{ matrix.python-version }}
 
-      - name: Set up Python ${{ matrix.python-version }}
-        run: uv python install ${{ matrix.python-version }}
-
-      - name: Install Dependencies
-        run: uv sync --frozen --dev || uv sync --dev
+      - name: Install Locked Dependencies
+        run: uv sync --locked --dev
 
       - name: Verify Zero Raw Clinical PHI or KMS Keys in Repository
-        run: |
-          uv run python -c "
-          import subprocess, sys
-          tracked = subprocess.check_output(['git', 'ls-files'], text=True).splitlines()
-          forbidden = [f for f in tracked if f.endswith(('.csv', '.hl7', '.mllp', '.fhir.json', '.pem', '.key'))]
-          if forbidden:
-              sys.exit(f'HIPAA REPOSITORY GATE FAILED: Forbidden clinical/secret files tracked: {forbidden}')
-          print('HIPAA Repository File Audit Passed: 0 forbidden clinical or key files tracked.')
-          "
+        run: uv run --no-sync python scripts/git_hooks.py block-phi
 
       - name: Run Ruff Code Formatter Check
-        run: uv run ruff format --check src tests scripts
+        run: uv run --no-sync ruff format --check src tests scripts
 
       - name: Run Ruff Linter
-        run: uv run ruff check src tests scripts
+        run: uv run --no-sync ruff check src tests scripts
 
       - name: Run Mypy Strict Static Type Checker
-        run: uv run mypy src tests scripts
+        run: uv run --no-sync mypy src tests scripts
 
       - name: Validate Docker Compose Specification (compose.yaml)
         run: docker compose -f compose.yaml config -q
 
       - name: Run Pytest Unit & Integration Suite (100% Coverage Gate)
-        run: uv run pytest --cov=src/healthcare_lakehouse --cov-branch --cov-report=term-missing --cov-report=xml --cov-fail-under=100
+        run: uv run --no-sync pytest --cov=src/healthcare_lakehouse --cov=scripts --cov-branch --cov-report=term-missing --cov-report=xml --cov-fail-under=100
 
       - name: Execute End-to-End Medallion Pipeline & HIPAA Safe Harbor Verification
         run: |
-          uv run healthcare-lakehouse run-pipeline \
+          uv run --no-sync healthcare-lakehouse run-pipeline \
             --patients 12 \
             --seed 42 \
             --output-dir /tmp/ci-lakehouse-verify \

@@ -12,14 +12,14 @@ The repository follows the official **Docker Compose Specification** using the c
 1. **`builder` Stage (`ghcr.io/astral-sh/uv:python3.12-bookworm-slim`):**
    - Uses two-phase BuildKit cache and bind mounts (`--mount=type=cache,target=/root/.cache/uv`, `--mount=type=bind,source=uv.lock,target=uv.lock`) with `UV_COMPILE_BYTECODE=1`, `UV_LINK_MODE=copy`, and `UV_PYTHON_DOWNLOADS=0` so dependency layers remain cached across source edits.
 2. **`qa` Stage (CI / Quality Assurance Target):**
-   - Extends `builder` with `--dev` dependencies, runs as non-root `lakehouse` (`UID=10001`), and executes `pytest --cov=src/healthcare_lakehouse --cov-branch --cov-fail-under=100`.
+   - Extends `builder` with `--dev` dependencies, sets `COVERAGE_FILE=/tmp/.coverage` for read-only root filesystems, runs as non-root `lakehouse` (`UID=10001`), and executes `pytest --cov=src/healthcare_lakehouse --cov=scripts --cov-branch --cov-fail-under=100`.
 3. **`runtime` Stage (`python:3.12-slim-bookworm` — Zero `uv` / Zero Dev Tools):**
-   - Copies only the compiled `/app/.venv` from `builder` (`COPY --from=builder --chown=lakehouse:lakehouse /app /app`), runs as unprivileged `USER lakehouse` (`UID=10001`, `/usr/sbin/nologin`), sets OCI metadata labels, and includes a container `HEALTHCHECK`.
+   - Installs the package non-editably (`--no-editable`) in `builder` and copies only `/app/.venv` (`COPY --from=builder --chown=lakehouse:lakehouse /app/.venv /app/.venv`), runs as unprivileged `USER lakehouse` (`UID=10001`, `/usr/sbin/nologin`), sets OCI metadata labels, and includes a container `HEALTHCHECK`.
 
 ### Canonical `compose.yaml` Services & Hardening
 1. **`minio-s3`:** Pinned release (`minio/minio:RELEASE.2025-02-18T16-25-55Z`) with native `mc ready local` `healthcheck`.
-2. **`lakehouse-pipeline`:** Targets `runtime`, waits for `minio-s3` via long-syntax `depends_on` (`condition: service_healthy`), and enforces `read_only: true`, `cap_drop: [ALL]`, and `security_opt: [no-new-privileges:true]`.
-3. **`lakehouse-qa`:** Targets `qa` under `profiles: ["qa", "test"]` for isolated containerized verification.
+2. **`lakehouse-pipeline`:** Targets `runtime`, persists Medallion zones to the managed `lakehouse_data` Docker volume (`/app/data:rw`) so raw Bronze PHI never writes directly to host bind-mount directories and non-root `UID=10001` ownership is preserved on Linux, waits for `minio-s3` via long-syntax `depends_on` (`condition: service_healthy`), and enforces `read_only: true`, `cap_drop: [ALL]`, and `security_opt: [no-new-privileges:true]`.
+3. **`lakehouse-qa`:** Targets `qa` under `profiles: ["qa", "test"]` with `COVERAGE_FILE=/tmp/.coverage` and `/tmp` `tmpfs` for isolated read-only containerized verification.
 
 ```bash
 # 1. Build and run the production Medallion pipeline against healthy MinIO S3

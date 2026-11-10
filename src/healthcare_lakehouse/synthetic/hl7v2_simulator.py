@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import timedelta
 
 from healthcare_lakehouse.models.fhir_resources import FHIRBundle, FHIRPatient
 
@@ -25,10 +26,10 @@ class HL7v2Simulator:
             f"{ts_str}||ADT^A01^ADT_A01|MSG-{encounter.id}|P|2.5.1"
         )
         pid = self._build_pid_segment(patient)
-        attending = (encounter.attending_physician or "Dr. House").replace(" ", "^")
+        xcn_attending = self._format_xcn_practitioner(encounter.attending_physician)
         pv1 = (
             f"PV1|1|{encounter.class_code}|ICU-WEST^BED-04^01||||"
-            f"NPI-9988^{attending}|||||||||||{encounter.id}|||||||||||||||||||||||||{ts_str}"
+            f"{xcn_attending}||||||||||||{encounter.id}|||||||||||||||||||||||||{ts_str}"
         )
 
         segments: list[str] = [msh, pid, pv1]
@@ -39,6 +40,27 @@ class HL7v2Simulator:
                 f"DG1|{idx}|I10|{coding.code}^{coding.display}^ICD10|{coding.display}|{dg1_ts}|F"
             )
         return "\n".join(segments)
+
+    def generate_adt_a03_from_bundle(self, bundle: FHIRBundle) -> str:
+        """Generate an HL7 v2.5.1 ADT^A03 (Patient Discharge) message from a FHIRBundle."""
+        patient = bundle.patients()[0]
+        encounter = bundle.encounters()[0]
+        admit_str = encounter.period_start.strftime("%Y%m%d%H%M%S")
+        discharge_dt = encounter.period_end or (encounter.period_start + timedelta(hours=6))
+        discharge_str = discharge_dt.strftime("%Y%m%d%H%M%S")
+
+        msh = (
+            f"MSH|^~\\&|BEDSIDE_EHR|{encounter.facility_id}|LAKEHOUSE_INGEST|MEDALLION|"
+            f"{discharge_str}||ADT^A03^ADT_A03|DIS-{encounter.id}|P|2.5.1"
+        )
+        pid = self._build_pid_segment(patient)
+        xcn_attending = self._format_xcn_practitioner(encounter.attending_physician)
+        pv1 = (
+            f"PV1|1|{encounter.class_code}|ICU-WEST^BED-04^01||||"
+            f"{xcn_attending}||||||||||||{encounter.id}|||||||||||||||||||||||||"
+            f"{admit_str}|{discharge_str}"
+        )
+        return "\n".join([msh, pid, pv1])
 
     def generate_oru_r01_from_bundle(self, bundle: FHIRBundle) -> str:
         """Generate an HL7 v2.5.1 ORU^R01 (Unsolicited Observation) message from a FHIRBundle."""
@@ -52,9 +74,10 @@ class HL7v2Simulator:
             f"{ts_str}||ORU^R01^ORU_R01|ORU-{encounter.id}|P|2.5.1"
         )
         pid = self._build_pid_segment(patient)
+        xcn_attending = self._format_xcn_practitioner(encounter.attending_physician)
         pv1 = (
             f"PV1|1|{encounter.class_code}|ICU-WEST^BED-04^01||||"
-            f"NPI-9988^Jenkins^Sarah|||||||||||{encounter.id}|||||||||||||||||||||||||{ts_str}"
+            f"{xcn_attending}||||||||||||{encounter.id}|||||||||||||||||||||||||{ts_str}"
         )
         obr = f"OBR|1|ORD-{encounter.id}|FIL-{encounter.id}|85353-1^Vital signs panel^LN|||{ts_str}"
 
@@ -98,6 +121,14 @@ class HL7v2Simulator:
                 "Invalid MLLP frame: missing start block (0x0B) or end block (0x1C0D)."
             )
         return frame[len(MLLP_START_BLOCK) : -len(MLLP_END_BLOCK)].decode("utf-8")
+
+    @staticmethod
+    def _format_xcn_practitioner(attending_physician: str | None) -> str:
+        clean = (attending_physician or "Dr. Sarah Jenkins, MD").replace(",", "")
+        tokens = [tok for tok in clean.split() if tok.rstrip(".").upper() not in {"DR", "MD", "DO"}]
+        given = tokens[0] if tokens else "Sarah"
+        family = tokens[-1] if len(tokens) >= 2 else "Jenkins"
+        return f"NPI-9988^{family}^{given}"
 
     @staticmethod
     def _build_pid_segment(patient: FHIRPatient) -> str:

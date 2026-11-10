@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import xml.etree.ElementTree as ET
 from datetime import date, datetime
 from typing import Any, Literal
@@ -24,16 +25,36 @@ from healthcare_lakehouse.models.fhir_resources import (
     FHIRQuantity,
 )
 
+_UNSAFE_XML_PATTERN: re.Pattern[str] = re.compile(r"<!\s*(?:DOCTYPE|ENTITY)\b", re.IGNORECASE)
+
 
 def _local_tag(tag: str) -> str:
     return tag.split("}")[-1] if "}" in tag else tag
 
 
-def _child_attr(parent: ET.Element, child_name: str, attr: str = "value") -> str:
+def _find_child(parent: ET.Element, child_name: str) -> ET.Element | None:
     for child in parent:
         if _local_tag(child.tag) == child_name:
-            return child.attrib.get(attr, "")
-    return ""
+            return child
+    return None
+
+
+def _child_attr(parent: ET.Element, child_name: str, attr: str = "value") -> str:
+    child = _find_child(parent, child_name)
+    return child.attrib.get(attr, "") if child is not None else ""
+
+
+def _parse_coding_element(
+    coding_el: ET.Element | None,
+    default_system: str,
+    default_code: str,
+) -> FHIRCoding:
+    if coding_el is None:
+        return FHIRCoding(system=default_system, code=default_code, display=default_code)
+    sys_str = coding_el.attrib.get("system") or _child_attr(coding_el, "system") or default_system
+    code_str = coding_el.attrib.get("code") or _child_attr(coding_el, "code") or default_code
+    disp_str = coding_el.attrib.get("display") or _child_attr(coding_el, "display") or code_str
+    return FHIRCoding(system=sys_str, code=code_str, display=disp_str)
 
 
 class FHIRParser:
@@ -52,6 +73,8 @@ class FHIRParser:
     def parse_xml_bundle(self, raw_xml: str | bytes) -> FHIRBundle:
         """Parse a hierarchical HL7 FHIR R4 XML Bundle into a canonical FHIRBundle."""
         xml_text = raw_xml.decode("utf-8") if isinstance(raw_xml, bytes) else raw_xml
+        if _UNSAFE_XML_PATTERN.search(xml_text):
+            raise ValueError("Unsafe XML declaration (DOCTYPE/ENTITY) rejected.")
         root = ET.fromstring(xml_text)
         if _local_tag(root.tag) != "Bundle":
             raise ValueError(f"Expected XML root <Bundle>, got <{_local_tag(root.tag)}>.")
@@ -195,13 +218,58 @@ class FHIRParser:
     def _parse_xml_encounter(enc_el: ET.Element) -> FHIREncounter:
         enc_id = _child_attr(enc_el, "id")
         subj_ref = _child_attr(enc_el, "subject", "reference").split("/")[-1]
-        start_ts = datetime.fromisoformat(_child_attr(enc_el, "periodStart"))
-        facility = _child_attr(enc_el, "facilityId") or "FAC-BOS-GEN-01"
+
+        status_raw = _child_attr(enc_el, "status")
+        valid_statuses: dict[str, Literal["planned", "in-progress", "finished", "cancelled"]] = {
+            "planned": "planned",
+            "in-progress": "in-progress",
+            "finished": "finished",
+            "cancelled": "cancelled",
+        }
+        status: Literal["planned", "in-progress", "finished", "cancelled"] = valid_statuses.get(
+            status_raw, "finished"
+        )
+
+        class_raw = _child_attr(enc_el, "class", "code")
+        valid_classes: dict[str, Literal["IMP", "EMER", "AMB", "ICU"]] = {
+            "IMP": "IMP",
+            "EMER": "EMER",
+            "AMB": "AMB",
+            "ICU": "ICU",
+        }
+        class_code: Literal["IMP", "EMER", "AMB", "ICU"] = valid_classes.get(class_raw, "ICU")
+
+        period_el = _find_child(enc_el, "period")
+        start_raw = (
+            _child_attr(period_el, "start")
+            if period_el is not None
+            else _child_attr(enc_el, "periodStart")
+        )
+        end_raw = _child_attr(period_el, "end") if period_el is not None else ""
+        start_ts = datetime.fromisoformat(start_raw)
+        end_ts = datetime.fromisoformat(end_raw) if end_raw else None
+
+        sp_ref = _child_attr(enc_el, "serviceProvider", "reference")
+        facility = (
+            sp_ref.split("/")[-1]
+            if sp_ref
+            else (_child_attr(enc_el, "facilityId") or "FAC-BOS-GEN-01")
+        )
+
+        part_el = _find_child(enc_el, "participant")
+        attending = (
+            (_child_attr(part_el, "individual", "display") or None) if part_el is not None else None
+        )
+
         return FHIREncounter(
             id=enc_id,
+            status=status,
+            class_code=class_code,
             subject_id=subj_ref,
             period_start=start_ts,
+            period_end=end_ts,
             facility_id=facility,
+            attending_physician=attending,
         )
 
     @staticmethod
@@ -211,50 +279,35 @@ class FHIRParser:
         enc_ref = _child_attr(obs_el, "encounter", "reference").split("/")[-1]
         eff_ts = datetime.fromisoformat(_child_attr(obs_el, "effectiveDateTime"))
 
-        coding_el: ET.Element | None = None
-        vq_el: ET.Element | None = None
-        vs_val: str | None = None
-        note_text: str | None = None
+        code_container = _find_child(obs_el, "code")
+        coding_el = _find_child(code_container, "coding") if code_container is not None else None
+        coding = _parse_coding_element(coding_el, "http://loinc.org", "8867-4")
 
-        for el in obs_el:
-            tag = _local_tag(el.tag)
-            if tag == "code":
-                for sub in el:
-                    if _local_tag(sub.tag) == "coding":
-                        coding_el = sub
-            elif tag == "valueQuantity":
-                vq_el = el
-            elif tag == "valueString":
-                vs_val = el.attrib.get("value", "")
-            elif tag == "note":
-                note_text = el.attrib.get("text")
+        vq_el = _find_child(obs_el, "valueQuantity")
+        value_quantity: FHIRQuantity | None = None
+        if vq_el is not None:
+            num_raw = vq_el.attrib.get("value") or _child_attr(vq_el, "value")
+            unit_raw = vq_el.attrib.get("unit") or _child_attr(vq_el, "unit")
+            code_raw = vq_el.attrib.get("code") or _child_attr(vq_el, "code") or unit_raw
+            value_quantity = FHIRQuantity(value=float(num_raw), unit=unit_raw, code=code_raw)
 
-        sys_str = (
-            coding_el.attrib.get("system", "http://loinc.org")
-            if coding_el is not None
-            else "http://loinc.org"
+        vs_el = _find_child(obs_el, "valueString")
+        vs_val = vs_el.attrib.get("value", "") if vs_el is not None else None
+
+        note_el = _find_child(obs_el, "note")
+        note_text = (
+            (note_el.attrib.get("text") or _child_attr(note_el, "text") or None)
+            if note_el is not None
+            else None
         )
-        code_str = coding_el.attrib.get("code", "8867-4") if coding_el is not None else "8867-4"
-        disp_str = coding_el.attrib.get("display", code_str) if coding_el is not None else code_str
 
         return FHIRObservation(
             id=obs_id,
             subject_id=subj_ref,
             encounter_id=enc_ref,
             effective_datetime=eff_ts,
-            code=FHIRCodeableConcept(
-                coding=(FHIRCoding(system=sys_str, code=code_str, display=disp_str),),
-                text=disp_str,
-            ),
-            value_quantity=(
-                FHIRQuantity(
-                    value=float(vq_el.attrib["value"]),
-                    unit=vq_el.attrib["unit"],
-                    code=vq_el.attrib.get("code", vq_el.attrib["unit"]),
-                )
-                if vq_el is not None
-                else None
-            ),
+            code=FHIRCodeableConcept(coding=(coding,), text=coding.display),
+            value_quantity=value_quantity,
             value_string=vs_val,
             note=note_text,
         )
@@ -265,18 +318,21 @@ class FHIRParser:
         subj_ref = _child_attr(cond_el, "subject", "reference").split("/")[-1]
         enc_ref = _child_attr(cond_el, "encounter", "reference").split("/")[-1]
         onset_ts = datetime.fromisoformat(_child_attr(cond_el, "onsetDateTime"))
-        sys_str = _child_attr(cond_el, "coding", "system")
-        code_str = _child_attr(cond_el, "coding", "code")
-        disp_str = _child_attr(cond_el, "coding", "display")
+
+        code_container = _find_child(cond_el, "code")
+        coding_el = (
+            _find_child(code_container, "coding")
+            if code_container is not None
+            else _find_child(cond_el, "coding")
+        )
+        coding = _parse_coding_element(coding_el, "http://hl7.org/fhir/sid/icd-10-cm", "A41.9")
+
         return FHIRCondition(
             id=cond_id,
             subject_id=subj_ref,
             encounter_id=enc_ref,
             onset_datetime=onset_ts,
-            code=FHIRCodeableConcept(
-                coding=(FHIRCoding(system=sys_str, code=code_str, display=disp_str),),
-                text=disp_str,
-            ),
+            code=FHIRCodeableConcept(coding=(coding,), text=coding.display),
         )
 
     @staticmethod
@@ -285,18 +341,27 @@ class FHIRParser:
         subj_ref = _child_attr(med_el, "subject", "reference").split("/")[-1]
         enc_ref = _child_attr(med_el, "encounter", "reference").split("/")[-1]
         auth_ts = datetime.fromisoformat(_child_attr(med_el, "authoredOn"))
-        sys_str = _child_attr(med_el, "coding", "system")
-        code_str = _child_attr(med_el, "coding", "code")
-        disp_str = _child_attr(med_el, "coding", "display")
-        dosage = _child_attr(med_el, "dosageText")
+
+        med_cc = _find_child(med_el, "medicationCodeableConcept")
+        coding_el = (
+            _find_child(med_cc, "coding") if med_cc is not None else _find_child(med_el, "coding")
+        )
+        coding = _parse_coding_element(
+            coding_el, "http://www.nlm.nih.gov/research/umls/rxnorm", "11124"
+        )
+
+        dosage_el = _find_child(med_el, "dosageInstruction")
+        dosage = (
+            _child_attr(dosage_el, "text")
+            if dosage_el is not None
+            else _child_attr(med_el, "dosageText")
+        )
+
         return FHIRMedicationRequest(
             id=med_id,
             subject_id=subj_ref,
             encounter_id=enc_ref,
             authored_on=auth_ts,
-            medication_code=FHIRCodeableConcept(
-                coding=(FHIRCoding(system=sys_str, code=code_str, display=disp_str),),
-                text=disp_str,
-            ),
+            medication_code=FHIRCodeableConcept(coding=(coding,), text=coding.display),
             dosage_text=dosage,
         )

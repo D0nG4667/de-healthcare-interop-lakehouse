@@ -27,6 +27,26 @@ from healthcare_lakehouse.synthetic.hl7v2_simulator import (
     MLLP_START_BLOCK,
 )
 
+_HL7_ESCAPE_MAP: tuple[tuple[str, str], ...] = (
+    (r"\F\\", "|"),
+    (r"\S\\", "^"),
+    (r"\T\\", "&"),
+    (r"\R\\", "~"),
+    (r"\E\\", "\\"),
+)
+
+
+def _unescape_hl7_value(value: str) -> str:
+    """Decode standard HL7 v2.5.1 escape sequences (\\F\\, \\S\\, \\T\\, \\R\\, \\E\\)."""
+    # Replace \E\ via sentinel first so literal '\F\' from '\E\F\E\' does not double-decode
+    sentinel = "\x00"
+    decoded = value.replace(r"\E" + "\\", sentinel)
+    decoded = decoded.replace(r"\F" + "\\", "|")
+    decoded = decoded.replace(r"\S" + "\\", "^")
+    decoded = decoded.replace(r"\T" + "\\", "&")
+    decoded = decoded.replace(r"\R" + "\\", "~")
+    return decoded.replace(sentinel, "\\")
+
 
 class HL7v2Segment(BaseModel):
     """Parsed representation of a single pipe-delimited HL7 v2 segment."""
@@ -36,18 +56,34 @@ class HL7v2Segment(BaseModel):
     segment_id: str
     fields: tuple[str, ...]
 
-    def field(self, index: int) -> str:
-        """Return 1-based HL7 field value (where MSH-1 is '|' and PID-3 is index 3)."""
+    def raw_field(self, index: int) -> str:
+        """Return unsplit, un-unescaped 1-based HL7 field value."""
         if index < 1 or index >= len(self.fields):
             return ""
         return self.fields[index]
 
-    def components(self, index: int) -> tuple[str, ...]:
-        """Return '^'-split sub-components for the given 1-based field index."""
-        raw = self.field(index)
+    def field(self, index: int) -> str:
+        """Return 1-based HL7 field value (where MSH-1 is '|' and PID-3 is index 3)."""
+        raw = self.raw_field(index)
+        if not raw:
+            return ""
+        if self.segment_id == "MSH" and index in {1, 2}:
+            return raw
+        return _unescape_hl7_value(raw)
+
+    def repetitions(self, index: int) -> tuple[tuple[str, ...], ...]:
+        """Return '~'-split repetitions, each split on '^' and unescaped."""
+        raw = self.raw_field(index)
         if not raw:
             return ()
-        return tuple(raw.split("^"))
+        return tuple(
+            tuple(_unescape_hl7_value(comp) for comp in rep.split("^")) for rep in raw.split("~")
+        )
+
+    def components(self, index: int) -> tuple[str, ...]:
+        """Return '^'-split sub-components for the first repetition of a 1-based field."""
+        reps = self.repetitions(index)
+        return reps[0] if reps else ()
 
 
 class HL7v2ParsedMessage(BaseModel):
@@ -121,6 +157,7 @@ class HL7v2Parser:
             patient_id=patient.id,
             facility_id=parsed.sending_facility,
             default_ts=parsed.timestamp,
+            message_type=parsed.message_type,
         )
 
         entries: list[FHIRBundleEntry] = [patient, encounter]
@@ -169,16 +206,41 @@ class HL7v2Parser:
 
     @staticmethod
     def _translate_pid_to_patient(pid_seg: HL7v2Segment) -> FHIRPatient:
-        pid3_comps = pid_seg.components(3)
-        mrn = pid3_comps[0] if pid3_comps else "MRN-UNKNOWN"
+        pid3_reps = pid_seg.repetitions(3)
+        identifiers: list[FHIRIdentifier] = []
+        primary_mrn = "MRN-UNKNOWN"
+        for rep in pid3_reps:
+            id_val = rep[0] if rep and rep[0] else "MRN-UNKNOWN"
+            id_type = rep[4] if len(rep) >= 5 and rep[4] else "MR"
+            if primary_mrn == "MRN-UNKNOWN" and id_type == "MR":
+                primary_mrn = id_val
+            identifiers.append(
+                FHIRIdentifier(
+                    system="http://hospital.example.org/mrn",
+                    value=id_val,
+                    type_code=id_type,
+                )
+            )
+        if not identifiers:
+            identifiers.append(
+                FHIRIdentifier(
+                    system="http://hospital.example.org/mrn",
+                    value=primary_mrn,
+                    type_code="MR",
+                )
+            )
 
         name_comps = pid_seg.components(5)
         family = name_comps[0] if name_comps else "Unknown"
         given = (name_comps[1],) if len(name_comps) >= 2 and name_comps[1] else ("Unknown",)
         prefix = (name_comps[4],) if len(name_comps) >= 5 and name_comps[4] else ()
 
-        dob_raw = pid_seg.field(7)[:8]
-        birth_date = date(int(dob_raw[:4]), int(dob_raw[4:6]), int(dob_raw[6:8]))
+        dob_digits = "".join(ch for ch in pid_seg.field(7) if ch.isdigit())
+        birth_date = (
+            date(int(dob_digits[:4]), int(dob_digits[4:6]), int(dob_digits[6:8]))
+            if len(dob_digits) >= 8
+            else date(1970, 1, 1)
+        )
 
         sex_raw = pid_seg.field(8).upper()
         gender_map: dict[str, Literal["male", "female", "other", "unknown"]] = {
@@ -199,14 +261,8 @@ class HL7v2Parser:
         ssn = pid_seg.field(19) or None
 
         return FHIRPatient(
-            id=f"pat-{mrn.lower()}",
-            identifiers=(
-                FHIRIdentifier(
-                    system="http://hospital.example.org/mrn",
-                    value=mrn,
-                    type_code="MR",
-                ),
-            ),
+            id=f"pat-{primary_mrn.lower()}",
+            identifiers=tuple(identifiers),
             names=(FHIRHumanName(family=family, given=given, prefix=prefix),),
             telecom=telecom,
             gender=gender,
@@ -220,7 +276,7 @@ class HL7v2Parser:
                 ),
             ),
             ssn=ssn,
-            clinical_note=f"Translated from HL7v2 PID for {given[0]} {family} (MRN {mrn})",
+            clinical_note=f"Translated from HL7v2 PID for {given[0]} {family} (MRN {primary_mrn})",
         )
 
     def _translate_pv1_to_encounter(
@@ -229,6 +285,7 @@ class HL7v2Parser:
         patient_id: str,
         facility_id: str,
         default_ts: datetime,
+        message_type: str = "ADT^A01",
     ) -> FHIREncounter:
         if pv1_seg is None:
             return FHIREncounter(
@@ -248,16 +305,28 @@ class HL7v2Parser:
         class_code: Literal["IMP", "EMER", "AMB", "ICU"] = valid_classes.get(raw_class, "ICU")
         visit_num = pv1_seg.field(19) or f"enc-{patient_id}"
         doc_comps = pv1_seg.components(7)
-        attending = " ".join(doc_comps[1:3]).strip() if len(doc_comps) >= 2 else None
+        attending = (
+            f"Dr. {doc_comps[2]} {doc_comps[1]}".strip()
+            if len(doc_comps) >= 3 and doc_comps[2]
+            else (" ".join(doc_comps[1:3]).strip() if len(doc_comps) >= 2 else None)
+        )
         admit_raw = pv1_seg.field(44)
         admit_ts = self._parse_hl7_datetime(admit_raw) if admit_raw else default_ts
 
+        discharge_raw = pv1_seg.field(45)
+        discharge_ts = self._parse_hl7_datetime(discharge_raw) if discharge_raw else None
+        is_discharged = discharge_ts is not None or message_type.startswith("ADT^A03")
+        status: Literal["planned", "in-progress", "finished", "cancelled"] = (
+            "finished" if is_discharged else "in-progress"
+        )
+
         return FHIREncounter(
             id=visit_num,
-            status="in-progress",
+            status=status,
             class_code=class_code,
             subject_id=patient_id,
             period_start=admit_ts,
+            period_end=discharge_ts,
             facility_id=facility_id,
             attending_physician=attending,
         )

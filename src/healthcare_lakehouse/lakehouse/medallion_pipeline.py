@@ -29,6 +29,104 @@ from healthcare_lakehouse.security.hipaa_anonymizer import (
 from healthcare_lakehouse.synthetic.hl7v2_simulator import HL7v2Simulator
 from healthcare_lakehouse.synthetic.synthea_orchestrator import SyntheaOrchestrator
 
+BRONZE_ENVELOPE_SCHEMA: pa.Schema = pa.schema(
+    [
+        ("envelope_id", pa.string()),
+        ("source_system", pa.string()),
+        ("protocol", pa.string()),
+        ("message_type", pa.string()),
+        ("ingested_at_utc", pa.string()),
+        ("payload_sha256", pa.string()),
+        ("raw_payload", pa.string()),
+    ]
+)
+
+SILVER_PATIENTS_SCHEMA: pa.Schema = pa.schema(
+    [
+        ("patient_token", pa.string()),
+        ("mrn_token", pa.string()),
+        ("gender", pa.string()),
+        ("birth_year", pa.int64()),
+        ("age_years", pa.int64()),
+        ("state", pa.string()),
+        ("postal_code_zip3", pa.string()),
+        ("scrubbed_clinical_note", pa.string()),
+    ]
+)
+
+SILVER_ENCOUNTERS_SCHEMA: pa.Schema = pa.schema(
+    [
+        ("encounter_token", pa.string()),
+        ("patient_token", pa.string()),
+        ("status", pa.string()),
+        ("encounter_class", pa.string()),
+        ("facility_id", pa.string()),
+        ("period_start_iso", pa.string()),
+    ]
+)
+
+SILVER_OBSERVATIONS_SCHEMA: pa.Schema = pa.schema(
+    [
+        ("observation_token", pa.string()),
+        ("patient_token", pa.string()),
+        ("encounter_token", pa.string()),
+        ("loinc_code", pa.string()),
+        ("display", pa.string()),
+        ("numeric_value", pa.float64()),
+        ("string_value", pa.string()),
+        ("unit", pa.string()),
+        ("effective_datetime_iso", pa.string()),
+    ]
+)
+
+SILVER_CONDITIONS_SCHEMA: pa.Schema = pa.schema(
+    [
+        ("condition_token", pa.string()),
+        ("patient_token", pa.string()),
+        ("encounter_token", pa.string()),
+        ("code", pa.string()),
+        ("display", pa.string()),
+        ("onset_datetime_iso", pa.string()),
+    ]
+)
+
+SILVER_MEDICATIONS_SCHEMA: pa.Schema = pa.schema(
+    [
+        ("medication_token", pa.string()),
+        ("patient_token", pa.string()),
+        ("encounter_token", pa.string()),
+        ("rxnorm_code", pa.string()),
+        ("display", pa.string()),
+        ("dosage_text", pa.string()),
+        ("authored_on_iso", pa.string()),
+    ]
+)
+
+GOLD_ALERTS_SCHEMA: pa.Schema = pa.schema(
+    [
+        ("patient_token", pa.string()),
+        ("encounter_token", pa.string()),
+        ("evaluated_at_iso", pa.string()),
+        ("news2_score", pa.int64()),
+        ("qsofa_score", pa.int64()),
+        ("risk_level", pa.string()),
+        ("sepsis_suspected", pa.bool_()),
+        ("recommended_response", pa.string()),
+        ("triggered_parameters", pa.string()),
+    ]
+)
+
+GOLD_COHORT_SCHEMA: pa.Schema = pa.schema(
+    [
+        ("gender", pa.string()),
+        ("encounter_class", pa.string()),
+        ("patient_count", pa.int64()),
+        ("mean_news2_score", pa.float64()),
+        ("max_news2_score", pa.int64()),
+        ("suspected_sepsis_cases", pa.int64()),
+    ]
+)
+
 
 class BronzeIngestionPayload(BaseModel):
     """Raw clinical payload entering the immutable Bronze landing zone."""
@@ -186,6 +284,66 @@ class MedallionLakehousePipeline:
             gold_cohort_parquet_path=gold_cohort_path,
         )
 
+    def verify_persisted_hipaa_tables(self) -> tuple[str, ...]:
+        """Scan persisted Silver and Gold Parquet files on disk for any PHI leak or bad token."""
+        violations: list[str] = []
+        silver_dir = self._settings.silver_zone_dir
+        gold_dir = self._settings.gold_zone_dir
+
+        table_checks: tuple[tuple[Path, tuple[str, ...], tuple[str, ...]], ...] = (
+            (
+                silver_dir / "silver_patients.parquet",
+                ("patient_token", "mrn_token"),
+                ("scrubbed_clinical_note",),
+            ),
+            (
+                silver_dir / "silver_encounters.parquet",
+                ("encounter_token", "patient_token"),
+                (),
+            ),
+            (
+                silver_dir / "silver_observations.parquet",
+                ("observation_token", "patient_token", "encounter_token"),
+                ("string_value",),
+            ),
+            (
+                silver_dir / "silver_conditions.parquet",
+                ("condition_token", "patient_token", "encounter_token"),
+                (),
+            ),
+            (
+                silver_dir / "silver_medications.parquet",
+                ("medication_token", "patient_token", "encounter_token"),
+                ("dosage_text",),
+            ),
+            (
+                gold_dir / "gold_patient_deterioration_alerts.parquet",
+                ("patient_token",),
+                (),
+            ),
+        )
+
+        for parquet_path, token_cols, text_cols in table_checks:
+            rows = self.read_parquet_records(parquet_path)
+            for row_idx, row in enumerate(rows):
+                for tok_col in token_cols:
+                    val = str(row.get(tok_col, ""))
+                    if val != "UNKNOWN-PATIENT" and not HIPAAComplianceAuditor.is_valid_kms_token(
+                        val
+                    ):
+                        violations.append(
+                            f"{parquet_path.name}[{row_idx}].{tok_col} invalid token: {val!r}"
+                        )
+                for txt_col in text_cols:
+                    txt_val = str(row.get(txt_col, ""))
+                    if txt_val:
+                        violations.extend(
+                            HIPAAComplianceAuditor.scan_text_for_phi(
+                                txt_val, f"{parquet_path.name}[{row_idx}].{txt_col}"
+                            )
+                        )
+        return tuple(violations)
+
     def _ingest_to_bronze(self, payloads: Sequence[BronzeIngestionPayload]) -> Path:
         now_iso = datetime.now(tz=UTC).isoformat()
         rows: list[dict[str, Any]] = []
@@ -203,7 +361,7 @@ class MedallionLakehousePipeline:
                 }
             )
         path = self._settings.bronze_zone_dir / "bronze_clinical_envelope.parquet"
-        self._write_parquet(rows, path)
+        self._write_parquet(rows, path, BRONZE_ENVELOPE_SCHEMA)
         return path
 
     def _write_silver_tables(
@@ -218,8 +376,8 @@ class MedallionLakehousePipeline:
 
         for bundle in bundles:
             for pat in bundle.patients():
-                addr = pat.addresses[0]
-                mrn_tok = pat.identifiers[0].value
+                addr = pat.addresses[0] if pat.addresses else None
+                mrn_tok = pat.identifiers[0].value if pat.identifiers else pat.id
                 patient_rows.append(
                     {
                         "patient_token": pat.id,
@@ -227,8 +385,8 @@ class MedallionLakehousePipeline:
                         "gender": pat.gender,
                         "birth_year": pat.birth_date.year,
                         "age_years": pat.age_years or 0,
-                        "state": addr.state,
-                        "postal_code_zip3": addr.postal_code,
+                        "state": addr.state if addr is not None else "UNK",
+                        "postal_code_zip3": addr.postal_code if addr is not None else "000",
                         "scrubbed_clinical_note": pat.clinical_note or "",
                     }
                 )
@@ -288,11 +446,21 @@ class MedallionLakehousePipeline:
 
         silver_dir = self._settings.silver_zone_dir
         patients_path = silver_dir / "silver_patients.parquet"
-        self._write_parquet(patient_rows, patients_path)
-        self._write_parquet(encounter_rows, silver_dir / "silver_encounters.parquet")
-        self._write_parquet(observation_rows, silver_dir / "silver_observations.parquet")
-        self._write_parquet(condition_rows, silver_dir / "silver_conditions.parquet")
-        self._write_parquet(medication_rows, silver_dir / "silver_medications.parquet")
+        self._write_parquet(patient_rows, patients_path, SILVER_PATIENTS_SCHEMA)
+        self._write_parquet(
+            encounter_rows, silver_dir / "silver_encounters.parquet", SILVER_ENCOUNTERS_SCHEMA
+        )
+        self._write_parquet(
+            observation_rows,
+            silver_dir / "silver_observations.parquet",
+            SILVER_OBSERVATIONS_SCHEMA,
+        )
+        self._write_parquet(
+            condition_rows, silver_dir / "silver_conditions.parquet", SILVER_CONDITIONS_SCHEMA
+        )
+        self._write_parquet(
+            medication_rows, silver_dir / "silver_medications.parquet", SILVER_MEDICATIONS_SCHEMA
+        )
 
         counts = {
             "patients": len(patient_rows),
@@ -319,7 +487,7 @@ class MedallionLakehousePipeline:
             for a in alerts
         ]
         path = self._settings.gold_zone_dir / "gold_patient_deterioration_alerts.parquet"
-        self._write_parquet(rows, path)
+        self._write_parquet(rows, path, GOLD_ALERTS_SCHEMA)
         return path
 
     def _write_gold_cohort_metrics(
@@ -331,8 +499,10 @@ class MedallionLakehousePipeline:
         grouped_sepsis: dict[tuple[str, str], int] = defaultdict(int)
 
         for bundle, alert in zip(bundles, alerts, strict=True):
-            gender = bundle.patients()[0].gender
-            enc_class = bundle.encounters()[0].class_code
+            patients = bundle.patients()
+            encounters = bundle.encounters()
+            gender = patients[0].gender if patients else "unknown"
+            enc_class = encounters[0].class_code if encounters else "AMB"
             key = (gender, enc_class)
             grouped_scores[key].append(alert.news2_score)
             if alert.sepsis_suspected:
@@ -352,11 +522,16 @@ class MedallionLakehousePipeline:
             )
 
         path = self._settings.gold_zone_dir / "gold_cohort_clinical_metrics.parquet"
-        self._write_parquet(cohort_rows, path)
+        self._write_parquet(cohort_rows, path, GOLD_COHORT_SCHEMA)
         return path, len(cohort_rows)
 
-    def _write_parquet(self, rows: Sequence[dict[str, Any]], path: Path) -> None:
-        table = pa.Table.from_pylist(list(rows))
+    def _write_parquet(
+        self,
+        rows: Sequence[dict[str, Any]],
+        path: Path,
+        schema: pa.Schema,
+    ) -> None:
+        table = pa.Table.from_pylist(list(rows), schema=schema)
         pq.write_table(table, path, compression=self._settings.parquet_compression)
 
     @staticmethod
