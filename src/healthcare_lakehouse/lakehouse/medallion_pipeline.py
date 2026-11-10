@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import pyarrow as pa
+import pyarrow.fs as pafs
 import pyarrow.parquet as pq
 from pydantic import BaseModel, ConfigDict
 
@@ -154,10 +155,10 @@ class PipelineExecutionMetrics(BaseModel):
     gold_cohort_metrics_written: int
     high_acuity_alerts_triggered: int
     hipaa_violations_detected: int
-    bronze_parquet_path: Path
-    silver_patients_parquet_path: Path
-    gold_alerts_parquet_path: Path
-    gold_cohort_parquet_path: Path
+    bronze_parquet_path: Path | str
+    silver_patients_parquet_path: Path | str
+    gold_alerts_parquet_path: Path | str
+    gold_cohort_parquet_path: Path | str
 
 
 class MedallionLakehousePipeline:
@@ -169,8 +170,10 @@ class MedallionLakehousePipeline:
         anonymizer: HIPAAAnonymizer | None = None,
         auditor: HIPAAComplianceAuditor | None = None,
         scorer: ClinicalDeteriorationScorer | None = None,
+        filesystem: pafs.FileSystem | None = None,
     ) -> None:
         self._settings = settings or LakehouseSettings()
+        self._fs: pafs.FileSystem = filesystem or self._settings.build_arrow_filesystem()
         self._anonymizer = anonymizer or HIPAAAnonymizer(settings=self._settings)
         self._auditor = auditor or HIPAAComplianceAuditor()
         self._scorer = scorer or ClinicalDeteriorationScorer()
@@ -228,12 +231,29 @@ class MedallionLakehousePipeline:
         )
         return self.run_medallion_batch(tuple(payloads))
 
+    def _ensure_storage_zones(self) -> None:
+        if self._settings.is_s3_storage:
+            zones: tuple[Literal["bronze", "silver", "gold"], ...] = ("bronze", "silver", "gold")
+            for zone in zones:
+                self._fs.create_dir(self._settings.zone_object_prefix(zone), recursive=True)
+        else:
+            self._settings.ensure_directories()
+
+    def _table_result_ref(
+        self,
+        zone: Literal["bronze", "silver", "gold"],
+        filename: str,
+    ) -> Path | str:
+        if self._settings.is_s3_storage:
+            return self._settings.table_uri(zone, filename)
+        return self._settings.base_storage_path / zone / filename
+
     def run_medallion_batch(
         self,
         payloads: Sequence[BronzeIngestionPayload],
     ) -> PipelineExecutionMetrics:
         """Execute Bronze -> Silver -> Gold Medallion transitions and persist Parquet tables."""
-        self._settings.ensure_directories()
+        self._ensure_storage_zones()
 
         # 1. BRONZE ZONE: Immutable Raw Envelope with SHA-256 Lineage
         bronze_path = self._ingest_to_bronze(payloads)
@@ -285,66 +305,70 @@ class MedallionLakehousePipeline:
         )
 
     def verify_persisted_hipaa_tables(self) -> tuple[str, ...]:
-        """Scan persisted Silver and Gold Parquet files on disk for any PHI leak or bad token."""
+        """Scan persisted Silver and Gold Parquet files in local or S3 storage for PHI leaks."""
         violations: list[str] = []
-        silver_dir = self._settings.silver_zone_dir
-        gold_dir = self._settings.gold_zone_dir
-
-        table_checks: tuple[tuple[Path, tuple[str, ...], tuple[str, ...]], ...] = (
+        table_checks: tuple[
+            tuple[Literal["silver", "gold"], str, tuple[str, ...], tuple[str, ...]],
+            ...,
+        ] = (
             (
-                silver_dir / "silver_patients.parquet",
+                "silver",
+                "silver_patients.parquet",
                 ("patient_token", "mrn_token"),
                 ("scrubbed_clinical_note",),
             ),
             (
-                silver_dir / "silver_encounters.parquet",
+                "silver",
+                "silver_encounters.parquet",
                 ("encounter_token", "patient_token"),
                 (),
             ),
             (
-                silver_dir / "silver_observations.parquet",
+                "silver",
+                "silver_observations.parquet",
                 ("observation_token", "patient_token", "encounter_token"),
                 ("string_value",),
             ),
             (
-                silver_dir / "silver_conditions.parquet",
+                "silver",
+                "silver_conditions.parquet",
                 ("condition_token", "patient_token", "encounter_token"),
                 (),
             ),
             (
-                silver_dir / "silver_medications.parquet",
+                "silver",
+                "silver_medications.parquet",
                 ("medication_token", "patient_token", "encounter_token"),
                 ("dosage_text",),
             ),
             (
-                gold_dir / "gold_patient_deterioration_alerts.parquet",
+                "gold",
+                "gold_patient_deterioration_alerts.parquet",
                 ("patient_token",),
                 (),
             ),
         )
 
-        for parquet_path, token_cols, text_cols in table_checks:
-            rows = self.read_parquet_records(parquet_path)
+        for zone, filename, token_cols, text_cols in table_checks:
+            rows = self.read_parquet_records(self._table_result_ref(zone, filename))
             for row_idx, row in enumerate(rows):
                 for tok_col in token_cols:
                     val = str(row.get(tok_col, ""))
                     if val != "UNKNOWN-PATIENT" and not HIPAAComplianceAuditor.is_valid_kms_token(
                         val
                     ):
-                        violations.append(
-                            f"{parquet_path.name}[{row_idx}].{tok_col} invalid token: {val!r}"
-                        )
+                        violations.append(f"{filename}[{row_idx}].{tok_col} invalid token: {val!r}")
                 for txt_col in text_cols:
                     txt_val = str(row.get(txt_col, ""))
                     if txt_val:
                         violations.extend(
                             HIPAAComplianceAuditor.scan_text_for_phi(
-                                txt_val, f"{parquet_path.name}[{row_idx}].{txt_col}"
+                                txt_val, f"{filename}[{row_idx}].{txt_col}"
                             )
                         )
         return tuple(violations)
 
-    def _ingest_to_bronze(self, payloads: Sequence[BronzeIngestionPayload]) -> Path:
+    def _ingest_to_bronze(self, payloads: Sequence[BronzeIngestionPayload]) -> Path | str:
         now_iso = datetime.now(tz=UTC).isoformat()
         rows: list[dict[str, Any]] = []
         for idx, item in enumerate(payloads, start=1):
@@ -360,14 +384,18 @@ class MedallionLakehousePipeline:
                     "raw_payload": item.raw_payload,
                 }
             )
-        path = self._settings.bronze_zone_dir / "bronze_clinical_envelope.parquet"
-        self._write_parquet(rows, path, BRONZE_ENVELOPE_SCHEMA)
-        return path
+        filename = "bronze_clinical_envelope.parquet"
+        self._write_parquet(
+            rows,
+            self._settings.table_storage_target("bronze", filename),
+            BRONZE_ENVELOPE_SCHEMA,
+        )
+        return self._table_result_ref("bronze", filename)
 
     def _write_silver_tables(
         self,
         bundles: Sequence[FHIRBundle],
-    ) -> tuple[dict[str, int], Path]:
+    ) -> tuple[dict[str, int], Path | str]:
         patient_rows: list[dict[str, Any]] = []
         encounter_rows: list[dict[str, Any]] = []
         observation_rows: list[dict[str, Any]] = []
@@ -444,22 +472,30 @@ class MedallionLakehousePipeline:
                     }
                 )
 
-        silver_dir = self._settings.silver_zone_dir
-        patients_path = silver_dir / "silver_patients.parquet"
-        self._write_parquet(patient_rows, patients_path, SILVER_PATIENTS_SCHEMA)
         self._write_parquet(
-            encounter_rows, silver_dir / "silver_encounters.parquet", SILVER_ENCOUNTERS_SCHEMA
+            patient_rows,
+            self._settings.table_storage_target("silver", "silver_patients.parquet"),
+            SILVER_PATIENTS_SCHEMA,
+        )
+        self._write_parquet(
+            encounter_rows,
+            self._settings.table_storage_target("silver", "silver_encounters.parquet"),
+            SILVER_ENCOUNTERS_SCHEMA,
         )
         self._write_parquet(
             observation_rows,
-            silver_dir / "silver_observations.parquet",
+            self._settings.table_storage_target("silver", "silver_observations.parquet"),
             SILVER_OBSERVATIONS_SCHEMA,
         )
         self._write_parquet(
-            condition_rows, silver_dir / "silver_conditions.parquet", SILVER_CONDITIONS_SCHEMA
+            condition_rows,
+            self._settings.table_storage_target("silver", "silver_conditions.parquet"),
+            SILVER_CONDITIONS_SCHEMA,
         )
         self._write_parquet(
-            medication_rows, silver_dir / "silver_medications.parquet", SILVER_MEDICATIONS_SCHEMA
+            medication_rows,
+            self._settings.table_storage_target("silver", "silver_medications.parquet"),
+            SILVER_MEDICATIONS_SCHEMA,
         )
 
         counts = {
@@ -469,9 +505,9 @@ class MedallionLakehousePipeline:
             "conditions": len(condition_rows),
             "medications": len(medication_rows),
         }
-        return counts, patients_path
+        return counts, self._table_result_ref("silver", "silver_patients.parquet")
 
-    def _write_gold_alerts(self, alerts: Sequence[ClinicalDeteriorationAlert]) -> Path:
+    def _write_gold_alerts(self, alerts: Sequence[ClinicalDeteriorationAlert]) -> Path | str:
         rows: list[dict[str, Any]] = [
             {
                 "patient_token": a.patient_token,
@@ -486,15 +522,19 @@ class MedallionLakehousePipeline:
             }
             for a in alerts
         ]
-        path = self._settings.gold_zone_dir / "gold_patient_deterioration_alerts.parquet"
-        self._write_parquet(rows, path, GOLD_ALERTS_SCHEMA)
-        return path
+        filename = "gold_patient_deterioration_alerts.parquet"
+        self._write_parquet(
+            rows,
+            self._settings.table_storage_target("gold", filename),
+            GOLD_ALERTS_SCHEMA,
+        )
+        return self._table_result_ref("gold", filename)
 
     def _write_gold_cohort_metrics(
         self,
         bundles: Sequence[FHIRBundle],
         alerts: Sequence[ClinicalDeteriorationAlert],
-    ) -> tuple[Path, int]:
+    ) -> tuple[Path | str, int]:
         grouped_scores: dict[tuple[str, str], list[int]] = defaultdict(list)
         grouped_sepsis: dict[tuple[str, str], int] = defaultdict(int)
 
@@ -521,22 +561,32 @@ class MedallionLakehousePipeline:
                 }
             )
 
-        path = self._settings.gold_zone_dir / "gold_cohort_clinical_metrics.parquet"
-        self._write_parquet(cohort_rows, path, GOLD_COHORT_SCHEMA)
-        return path, len(cohort_rows)
+        filename = "gold_cohort_clinical_metrics.parquet"
+        self._write_parquet(
+            cohort_rows,
+            self._settings.table_storage_target("gold", filename),
+            GOLD_COHORT_SCHEMA,
+        )
+        return self._table_result_ref("gold", filename), len(cohort_rows)
 
     def _write_parquet(
         self,
         rows: Sequence[dict[str, Any]],
-        path: Path,
+        target: str,
         schema: pa.Schema,
     ) -> None:
         table = pa.Table.from_pylist(list(rows), schema=schema)
-        pq.write_table(table, path, compression=self._settings.parquet_compression)
+        pq.write_table(
+            table,
+            target,
+            filesystem=self._fs,
+            compression=self._settings.parquet_compression,
+        )
 
-    @staticmethod
-    def read_parquet_records(path: Path) -> list[dict[str, Any]]:
-        """Read a Parquet file from Bronze, Silver, or Gold storage into Python dicts."""
-        table = pq.read_table(path)
+    def read_parquet_records(self, path: Path | str) -> list[dict[str, Any]]:
+        """Read a Parquet file from local or S3 Bronze/Silver/Gold storage into Python dicts."""
+        path_str = str(path)
+        target = path_str.removeprefix("s3://") if path_str.startswith("s3://") else path_str
+        table = pq.read_table(target, filesystem=self._fs)
         result: list[dict[str, Any]] = table.to_pylist()
         return result

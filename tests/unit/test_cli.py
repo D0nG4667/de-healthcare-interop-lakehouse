@@ -6,10 +6,12 @@ import json
 from pathlib import Path
 
 import pyarrow as pa
+import pyarrow.fs as pafs
 import pyarrow.parquet as pq
 import pytest
 
 from healthcare_lakehouse.cli import main
+from healthcare_lakehouse.config.settings import LakehouseSettings
 from healthcare_lakehouse.security.hipaa_anonymizer import HIPAAComplianceError
 
 
@@ -108,3 +110,45 @@ def test_cli_verify_hipaa_detects_tampered_parquet_phi_leak(
                 "--verify-hipaa",
             ]
         )
+
+
+def test_cli_run_pipeline_supports_s3_minio_arguments(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Verify CLI --s3-bucket, --s3-prefix, and --s3-endpoint-url execute in S3 storage mode."""
+    s3_root = tmp_path / "cli_minio_store"
+    s3_root.mkdir(parents=True, exist_ok=True)
+    mock_fs = pafs.SubTreeFileSystem(str(s3_root), pafs.LocalFileSystem())
+
+    monkeypatch.setenv("LAKEHOUSE_S3_ALLOW_BUCKET_CREATION", "true")
+    monkeypatch.setattr(
+        LakehouseSettings,
+        "build_arrow_filesystem",
+        lambda self: mock_fs,
+    )
+
+    exit_code = main(
+        [
+            "run-pipeline",
+            "--patients",
+            "3",
+            "--seed",
+            "42",
+            "--s3-bucket",
+            "hc-minio-bucket",
+            "--s3-prefix",
+            "clinical",
+            "--s3-endpoint-url",
+            "http://minio-s3:9000",
+            "--verify-hipaa",
+        ]
+    )
+    assert exit_code == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "SUCCESS"
+    assert report["storage_backend"] == "s3"
+    assert report["gold_alerts_parquet_path"] == (
+        "s3://hc-minio-bucket/clinical/gold/gold_patient_deterioration_alerts.parquet"
+    )

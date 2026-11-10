@@ -17,9 +17,10 @@ The repository follows the official **Docker Compose Specification** using the c
    - Installs the package non-editably (`--no-editable`) in `builder` and copies only `/app/.venv` (`COPY --from=builder --chown=lakehouse:lakehouse /app/.venv /app/.venv`), runs as unprivileged `USER lakehouse` (`UID=10001`, `/usr/sbin/nologin`), sets OCI metadata labels, and includes a container `HEALTHCHECK`.
 
 ### Canonical `compose.yaml` Services & Hardening
-1. **`minio-s3`:** Pinned release (`minio/minio:RELEASE.2025-02-18T16-25-55Z`) with native `mc ready local` `healthcheck`.
-2. **`lakehouse-pipeline`:** Targets `runtime`, persists Medallion zones to the managed `lakehouse_data` Docker volume (`/app/data:rw`) so raw Bronze PHI never writes directly to host bind-mount directories and non-root `UID=10001` ownership is preserved on Linux, waits for `minio-s3` via long-syntax `depends_on` (`condition: service_healthy`), and enforces `read_only: true`, `cap_drop: [ALL]`, and `security_opt: [no-new-privileges:true]`.
-3. **`lakehouse-qa`:** Targets `qa` under `profiles: ["qa", "test"]` with `COVERAGE_FILE=/tmp/.coverage` and `/tmp` `tmpfs` for isolated read-only containerized verification.
+1. **`minio-s3`:** Pinned release (`minio/minio:RELEASE.2025-02-18T16-25-55Z`) with native `mc ready local` `healthcheck` and persistent `minio_storage` volume.
+2. **`minio-init`:** One-shot bucket provisioning job (`mc mb --ignore-existing`) running with `read_only: true`, `cap_drop: [ALL]`, and `/tmp/.mc` `tmpfs` before pipeline startup.
+3. **`lakehouse-pipeline`:** Targets `runtime`, waits for `minio-s3` (`condition: service_healthy`) and `minio-init` (`condition: service_completed_successfully`), and streams Bronze, Silver, and Gold Parquet tables directly into MinIO S3 (`s3://healthcare-lakehouse/medallion/{bronze,silver,gold}/...`) via `pyarrow.fs.S3FileSystem` (including post-write `--verify-hipaa` object audits), enforcing `read_only: true`, `cap_drop: [ALL]`, and `security_opt: [no-new-privileges:true]`.
+4. **`lakehouse-qa`:** Targets `qa` under `profiles: ["qa", "test"]` with `COVERAGE_FILE=/tmp/.coverage` and `/tmp` `tmpfs` for isolated read-only containerized verification.
 
 ```bash
 # 1. Build and run the production Medallion pipeline against healthy MinIO S3
