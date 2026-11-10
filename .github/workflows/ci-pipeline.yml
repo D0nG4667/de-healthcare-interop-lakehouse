@@ -58,13 +58,16 @@ jobs:
           "
 
       - name: Run Ruff Code Formatter Check
-        run: uv run ruff format --check src tests
+        run: uv run ruff format --check src tests scripts
 
       - name: Run Ruff Linter
-        run: uv run ruff check src tests
+        run: uv run ruff check src tests scripts
 
       - name: Run Mypy Strict Static Type Checker
-        run: uv run mypy src
+        run: uv run mypy src tests scripts
+
+      - name: Validate Docker Compose Specification (compose.yaml)
+        run: docker compose -f compose.yaml config -q
 
       - name: Run Pytest Unit & Integration Suite (100% Coverage Gate)
         run: uv run pytest --cov=src/healthcare_lakehouse --cov-branch --cov-report=term-missing --cov-report=xml --cov-fail-under=100
