@@ -1,0 +1,71 @@
+name: Enterprise Healthcare Lakehouse CI/CD & HIPAA Compliance Gate
+
+on:
+  push:
+    branches:
+      - main
+      - staging
+      - develop
+      - "feature/**"
+  pull_request:
+    branches:
+      - main
+      - staging
+      - develop
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  code-quality-and-hipaa-gate:
+    name: Lint, Typecheck, HIPAA Audit & 100% Coverage (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install uv & Python ${{ matrix.python-version }}
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install Locked Dependencies
+        run: uv sync --locked --dev
+
+      - name: Verify Zero Raw Clinical PHI or KMS Keys in Repository
+        run: uv run --no-sync python scripts/git_hooks.py block-phi
+
+      - name: Run Ruff Code Formatter Check
+        run: uv run --no-sync ruff format --check src tests scripts
+
+      - name: Run Ruff Linter
+        run: uv run --no-sync ruff check src tests scripts
+
+      - name: Run Mypy Strict Static Type Checker
+        run: uv run --no-sync mypy src tests scripts
+
+      - name: Validate Docker Compose Specification (compose.yaml)
+        run: docker compose -f compose.yaml config -q
+
+      - name: Run Pytest Unit & Integration Suite (100% Coverage Gate)
+        run: uv run --no-sync pytest --cov=src/healthcare_lakehouse --cov=scripts --cov-branch --cov-report=term-missing --cov-report=xml --cov-fail-under=100
+
+      - name: Execute End-to-End Medallion Pipeline & HIPAA Safe Harbor Verification
+        run: |
+          uv run --no-sync healthcare-lakehouse run-pipeline \
+            --patients 12 \
+            --seed 42 \
+            --output-dir /tmp/ci-lakehouse-verify \
+            --verify-hipaa
