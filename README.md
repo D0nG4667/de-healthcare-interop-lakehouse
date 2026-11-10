@@ -179,7 +179,7 @@ Every engineering claim in this repository is backed by reproducible, automated 
 
 - **100.0% HIPAA Safe Harbor Compliance (Zero Leaked PHI):** Automated audits via [`HIPAAComplianceAuditor`](src/healthcare_lakehouse/security/hipaa_anonymizer.py) verify that **100% of the 18 HIPAA Safe Harbor identifiers** (names, street/city, restricted 3-digit ZIPs, full dates, ages `>= 90`, phones, emails, URLs, SSNs, MRNs, device IPs, and free-text clinical notes) are redacted, top-coded, or KMS-tokenized before Silver/Gold persistence.
 - **Sub-Second Clinical Deterioration Alerting (`< 2 ms` per Bundle):** [`ClinicalDeteriorationScorer`](src/healthcare_lakehouse/scoring/clinical_deterioration.py) evaluates 9 LOINC vital sign streams per patient, accurately separating high-acuity sepsis cases (`NEWS2 = 17`, `qSOFA = 3`, `HIGH` risk) from stable chronic cases (`NEWS2 = 0`, `qSOFA = 0`, `LOW` risk).
-- **100.00% Verified Line & Branch Test Coverage:** `37` unit and end-to-end integration tests cover `1,652` statements and `468` branches at **100.00% coverage** (`uv run pytest --cov-fail-under=100`), with `0` Ruff lint errors and `0` Mypy `--strict` errors.
+- **100.00% Verified Line & Branch Test Coverage:** `37` unit and end-to-end integration tests cover `1,661` statements and `472` branches at **100.00% coverage** (`uv run pytest --cov-fail-under=100`), with `0` Ruff lint errors and `0` Mypy `--strict` errors.
 
 ---
 
@@ -251,7 +251,9 @@ uv run --no-sync healthcare-lakehouse run-pipeline \
 # Provision MinIO S3 bucket and stream Bronze -> Silver -> Gold Parquet tables to s3://healthcare-lakehouse/medallion/...
 docker compose -f compose.yaml up --build --abort-on-container-exit
 
-# Or target any S3-compatible endpoint / AWS S3 bucket directly from the CLI
+# Or target a local MinIO S3 endpoint / AWS S3 bucket directly from the CLI
+LAKEHOUSE_S3_ACCESS_KEY=lakehouse_admin \
+LAKEHOUSE_S3_SECRET_KEY=hipaa_safe_harbor_local_secret \
 uv run --no-sync healthcare-lakehouse run-pipeline \
   --patients 12 \
   --seed 42 \
